@@ -3,7 +3,7 @@ import * as data from "./data.js";
 import { buildStates, todayQueue, ymd, daysBetween, EXAMS } from "./srs.js";
 import { rich, inline, escapeHTML as esc } from "./render.js";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 const SUBJECTS = ["数学", "物理", "英語", "電験"];
 const MARK = { o: "○", d: "△", x: "×" };
 const LAB = "ABCDE";
@@ -222,13 +222,15 @@ async function card(p, { onDone, progress }) {
   window.scrollTo(0, 0);
   $("#figs", box).innerHTML = await figuresHTML(p);
 
-  const order = shuffle(p.choices.length);
+  // 電験は本番と同じく (1)〜(5) の元の順（数値が小さい順）。ほかの科目は毎回並べ替える
+  const denken = p.subject === "電験";
+  const order = denken ? [...p.choices.keys()] : shuffle(p.choices.length);
   const wrap = $("#choices", box);
   order.forEach((idx, pos) => {
     const b = document.createElement("button");
     b.className = "choice";
     b.dataset.idx = idx;
-    b.innerHTML = `<span class="lab">${LAB[pos]}</span>${inline(p.choices[idx])}`;
+    b.innerHTML = `<span class="lab">${denken ? `(${pos + 1})` : LAB[pos]}</span>${inline(p.choices[idx])}`;
     b.onclick = () => answer(idx);
     wrap.append(b);
   });

@@ -91,6 +91,11 @@ with sync_playwright() as pw:
     rates = ["x", "d", "o", "o"]
     for i, r in enumerate(rates):
         page.wait_for_selector(".choice")
+        if "電験" in page.inner_text(".meta"):
+            labs = page.eval_on_selector_all(".choice .lab", "els => els.map(e => e.textContent)")
+            check(labs == ["(1)", "(2)", "(3)", "(4)", "(5)"], f"電験は (1)〜(5) の5択 {labs}")
+            idxs = page.eval_on_selector_all(".choice", "els => els.map(e => e.dataset.idx)")
+            check(idxs == ["0", "1", "2", "3", "4"], "電験は元の順に並ぶ")
         if i == 0:
             check(page.locator(".katex").count() > 0, "数式が KaTeX で描かれる")
             page.screenshot(path=OUT / "03-question.png", full_page=True)
@@ -110,6 +115,8 @@ with sync_playwright() as pw:
             check(page.locator(".rate .x.hint").count() == 1, "不正解なら×をすすめる")
             page.screenshot(path=OUT / "04-answer.png", full_page=True)
         page.click(f".rate .{r}")
+        nxt = f"{i + 2}/{len(rates)}"
+        page.wait_for_function(f"() => document.querySelector('#title').textContent.includes('{nxt}') || document.body.textContent.includes('おつかれさまでした')")
     page.wait_for_selector("text=おつかれさまでした")
     page.screenshot(path=OUT / "05-summary.png", full_page=True)
     check("4" in page.inner_text(".hero .big"), "まとめに4問")
