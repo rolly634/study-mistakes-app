@@ -96,3 +96,13 @@ export async function rest(path, { method = "GET", body, prefer } = {}) {
   const text = await r.text();
   return text ? JSON.parse(text) : null;
 }
+
+// Storage（非公開バケット）のファイルを取得する。path 例："figures/x.svg"
+export async function object(bucket, path) {
+  const t = await token();
+  const r = await fetch(`${SUPABASE_URL}/storage/v1/object/authenticated/${bucket}/${path.split("/").map(encodeURIComponent).join("/")}`, {
+    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${t}` },
+  });
+  if (!r.ok) throw new SupaError(r.status, `取得できません（${path}）`);
+  return r;
+}

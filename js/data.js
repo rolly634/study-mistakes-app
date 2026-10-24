@@ -1,5 +1,6 @@
-// 問題・図は GitHub（study-mistakes）から、解いた記録・ブックマーク・ノートの仕分け・写真待ちは
-// Supabase（進捗管理アプリと共有）でやりとりする。どちらも端末内（IndexedDB）に保存し、オフラインでも動く。
+// 問題・ノート・図・元の写真も、解いた記録・ブックマーク・ノートの仕分け・写真待ちも、Supabase（進捗管理アプリと共有）から。
+// 問題などの正本は非公開リポジトリ study-mistakes で、push のたびに GitHub Actions が Supabase に写す。
+// GitHub のトークンは旧方式（ログインしていないときだけ GitHub から直接読む）。端末内（IndexedDB）に保存し、オフラインでも動く。
 // 変更は「操作」として ops に積み、ログイン中・オンラインのときに Supabase へ送る。
 
 import * as store from "./store.js";
@@ -36,6 +37,13 @@ export function canSupa() {
   return !demo() && !!supa.user();
 }
 
+// 元の写真を見られるか（ログインしているか、旧方式のトークンがあるか）
+export function canPhotos() {
+  return canSupa() || canGitHub();
+}
+
+const BUCKET = "mistakes";
+
 export function uuid() {
   if (crypto.randomUUID) return crypto.randomUUID();
   return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
@@ -50,7 +58,7 @@ function setProblems(list, notes = []) {
 }
 
 function allFigures(j) {
-  return [...j.problems, ...(j.notes || [])].flatMap((x) => x.figures || []);
+  return [...j.problems, ...(j.notes || [])].flatMap((x) => [...(x.figures || []), ...(x.parts || []).flatMap((pt) => pt.figures || [])]);
 }
 
 export async function loadLocal() {
@@ -90,6 +98,7 @@ async function pullProblems(onStep) {
     await store.set("demo:notes", j.notes || []);
     return j.problems.length;
   }
+  if (canSupa()) return pullContent(onStep);
   if (!canGitHub()) return null;
   const r = repo();
   onStep("問題を取得中");
@@ -105,6 +114,40 @@ async function pullProblems(onStep) {
   await store.set("problems", j.problems);
   await store.set("notes", j.notes || []);
   return j.problems.length;
+}
+
+// Supabase の mistake_content から、前回から変わった問題・ノートだけ取ってくる（hash で比べる）
+async function pullContent(onStep) {
+  onStep("問題を取得中");
+  const local = await store.get("content", {}); // { id: {kind, data, hash} }
+  const list = await supa.rest("mistake_content?select=id,kind,hash&kind=in.(problem,note)");
+  const want = list.filter((x) => local[x.id]?.hash !== x.hash).map((x) => x.id);
+  for (let i = 0; i < want.length; i += 40) {
+    onStep(`問題を取得中（${Math.min(i + 40, want.length)}/${want.length}）`);
+    const ids = want.slice(i, i + 40).map((x) => `"${x}"`).join(",");
+    const rows = await supa.rest(`mistake_content?select=id,kind,data,hash&id=in.(${encodeURIComponent(ids)})`);
+    for (const r of rows) local[r.id] = { kind: r.kind, data: r.data, hash: r.hash };
+  }
+  const keep = new Set(list.map((x) => x.id));
+  for (const id of Object.keys(local)) if (!keep.has(id)) delete local[id];
+  await store.set("content", local);
+  const byDate = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id < b.id ? -1 : 1);
+  const vals = Object.values(local);
+  const problems = vals.filter((x) => x.kind === "problem").map((x) => x.data).sort(byDate);
+  const notes = vals.filter((x) => x.kind === "note").map((x) => x.data).sort(byDate);
+  let figs = 0;
+  for (const f of allFigures({ problems, notes })) {
+    if (!(await store.get("fig:" + f.file))) {
+      onStep(`図を取得中（${++figs}）`);
+      try {
+        await store.set("fig:" + f.file, await (await supa.object(BUCKET, f.file)).text());
+      } catch (e) { console.warn(e); }
+    }
+  }
+  setProblems(problems, notes);
+  await store.set("problems", problems);
+  await store.set("notes", notes);
+  return problems.length;
 }
 
 async function pullSupa(onStep) {
@@ -131,7 +174,7 @@ async function pullSupa(onStep) {
 export async function pull(onStep = () => {}) {
   const problems = await pullProblems(onStep);
   const supaOk = await pullSupa(onStep);
-  if (problems === null && !supaOk && !demo()) throw new Error("設定で GitHub のトークンを入力し、ログインしてください");
+  if (problems === null && !supaOk && !demo()) throw new Error("設定で、進捗管理アプリと同じアカウントでログインしてください");
   state.lastSync = new Date().toISOString();
   await store.set(ns() + "lastSync", state.lastSync);
   return { problems: problems ?? state.problems.length };
@@ -255,7 +298,10 @@ export async function cancelInbox(id) {
 export async function figureURL(file) {
   const k = demo() ? "fig:demo/" + file : "fig:" + file;
   let svg = await store.get(k);
-  if (!svg && !demo() && canGitHub()) {
+  if (!svg && !demo() && canSupa()) {
+    svg = await (await supa.object(BUCKET, file)).text();
+    await store.set(k, svg);
+  } else if (!svg && !demo() && canGitHub()) {
     svg = await repo().text(file);
     await store.set(k, svg);
   }
@@ -265,7 +311,7 @@ export async function figureURL(file) {
 export async function originalURL(path) {
   let b = await store.get("orig:" + path);
   if (!b) {
-    b = await repo().blob(path);
+    b = canSupa() ? await (await supa.object(BUCKET, path)).blob() : await repo().blob(path);
     await store.set("orig:" + path, b);
   }
   return URL.createObjectURL(b);

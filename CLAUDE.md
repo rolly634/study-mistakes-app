@@ -15,11 +15,11 @@
 index.html, manifest.webmanifest, sw.js   PWA 本体（sw.js がアプリ本体をキャッシュ）
 css/app.css                               スマホ幅前提、ダークモード対応
 js/app.js      画面（ホーム・出題・一覧・疑問ノート・仕分け・送ったもの・設定）と遷移（#home, #list, #settings, #review, #sort, #inbox, #problem/<id>, #note/<id>）。Claude に送る欄（⋯で 未分類／修正依頼／質問／メモ）、インストールボタン
-js/data.js     問題・図（GitHub）と、記録・ブックマーク・ノートの仕分け・写真待ち（Supabase）の取得と送信。送信は ops に積んで順に送る
-js/github.js   GitHub Contents API（raw 取得）
+js/data.js     問題・ノート（mistake_content、hash で差分取得）・図と写真（storage の mistakes バケット）と、記録・ブックマーク・ノートの仕分け・写真待ち・受信箱の取得と送信。すべて Supabase。送信は ops に積んで順に送る
+js/github.js   GitHub Contents API（旧方式。ログインしていないときだけ使う）
 js/supa.js     Supabase の最小クライアント（fetch のみ。メール＋パスワードでログイン、REST）
 js/tracker.js  復習時間の自動記録（5分で区切る、1分未満は捨てる）
-js/srs.js      間隔反復（解けなかった 1日、解けた 7→14→28→56日、上限は試験までの残り日数の半分）。定着／要注意の判定
+js/srs.js      間隔反復（解けなかった 1日、解けた 7→14→28→56日、上限は試験までの残り日数の半分）。定着／要注意の判定。1日の出題数の上限はない
 js/render.js   Markdown＋LaTeX → HTML（KaTeX、DOMPurify）
 js/store.js    IndexedDB（データ）と localStorage（設定・端末ID）
 demo/          見本モードのデータ
@@ -28,7 +28,8 @@ tests/         Playwright の動作テスト
 
 ## データの約束
 
-- GitHub（読むだけ）：`index/problems.json`（`problems` と `notes`）、`figures/*.svg`、`originals/*.jpg`（ボタンを押したときだけ）
+- 問題データの正本は非公開の `rolly634/study-mistakes`。push のたびに GitHub Actions が Supabase に写す（Edge Function `sync-mistakes`）。アプリは GitHub を読まない（旧方式のトークンは任意）
+- Supabase（読むだけ）：`mistake_content`（problem／note。`data` が問題・ノートの JSON、`hash` で差分）、storage の `mistakes` バケット（`figures/*.svg`、`originals/*.jpg`。写真はボタンを押したときだけ）
 - Supabase（本人の行だけ読み書き）
   - 書く：`attempts`（problem_id, solved, chosen, parts, at, device。id は端末で作る uuid）、`inbox`（Claude に送る。id, kind, body, target_type, target_id, part, sent_at。未対応のものは取り消し＝DELETE できる）、`sessions`（subject=review, source=mistakes, id=`mistakes-<uuid>`）、`bookmarks`、`note_status`（teichaku／fukushu）、`photo_dismissed`（mark_id）
   - 読む：上の表（inbox は status・reply も）と、ビュー `photo_waiting`

@@ -1,8 +1,8 @@
-"""誤答トレーニング v0.6.0 の動作テスト（スマホ幅）。
+"""誤答トレーニング v0.7.0 の動作テスト（スマホ幅）。
 
 1. 見本モード：選んだ答えで自動判定 → 解説 → 次へ、小問つき問題（小問ごとに解説→次の小問、全問正解で解けた）、
    ブックマーク、疑問ノートのスワイプ仕分け、間隔反復
-2. 連携モード：GitHub（問題）と Supabase（記録）を偽のサーバーで代用し、ログイン、写真待ちの確認、
+2. 連携モード：Supabase（問題・図・記録）を偽のサーバーで代用し、ログインだけで問題が読めること（GitHub トークンなし）、写真待ちの確認、
    解いた記録・ブックマーク・ノートの仕分け・復習時間の送信、Claude に送る（⋯で種類切り替え・問題から・取り消し・返事の表示）、
    インストールボタン、端末データを消したあとの復元、オフラインを確認
 
@@ -86,6 +86,10 @@ def gh(route):
 
 
 # ---- 偽の Supabase ----
+import hashlib
+content = [{"id": x["id"], "kind": k, "data": x, "hash": hashlib.sha1(json.dumps(x, sort_keys=True).encode()).hexdigest()[:16]}
+           for k, xs in (("problem", probs), ("note", notes)) for x in xs]
+content_gets = []
 db = {"attempts": [], "sessions": [], "bookmarks": [], "note_status": [], "photo_dismissed": [], "inbox": [],
       "waiting": [{"mark_id": "m-1", "item_id": "GO1-43", "label": "合格るIAIIB 43", "subject": "math", "marked_on": "2026-10-24"}]}
 
@@ -104,7 +108,20 @@ def sb(route):
         return route.fulfill(status=204, body="")
     if req.headers.get("authorization") != "Bearer at1":
         return route.fulfill(status=401, json={"message": "JWT"})
+    if u.path.startswith("/storage/v1/object/authenticated/mistakes/"):
+        path = unquote(u.path[len("/storage/v1/object/authenticated/mistakes/"):])
+        if path not in remote:
+            return route.fulfill(status=404, json={"message": "not found"})
+        return route.fulfill(body=remote[path], headers={"Content-Type": "image/svg+xml"})
     table = u.path.split("/")[-1]
+    if table == "mistake_content":
+        rows = content
+        if "id" in q:
+            ids = {x.strip('"') for x in q["id"][0].removeprefix("in.(").removesuffix(")").split(",")}
+            rows = [r for r in rows if r["id"] in ids]
+            content_gets.append(len(rows))
+            return route.fulfill(json=rows)
+        return route.fulfill(json=[{"id": r["id"], "kind": r["kind"], "hash": r["hash"]} for r in rows])
     body = json.loads(req.post_data) if req.post_data else None
     if table == "photo_waiting":
         gone = {d["mark_id"] for d in db["photo_dismissed"]}
@@ -252,10 +269,7 @@ with sync_playwright() as pw:
     pg.on("console", lambda m: m.type in ("error", "warning") and print("    console:", m.text[:200]))
     pg.on("dialog", lambda d: d.accept())
     pg.goto(f"http://localhost:{PORT}/#settings")
-    pg.wait_for_selector("#token")
-    pg.fill("#token", "test-token")
-    pg.click("#save")
-    pg.wait_for_function("() => document.querySelector('#toast').textContent.includes('接続しました')")
+    pg.wait_for_selector("#email")
     pg.fill("#email", "me@example.com")
     pg.fill("#pw", "wrong")
     pg.click("#login")
@@ -265,6 +279,13 @@ with sync_playwright() as pw:
     pg.click("#login")
     pg.wait_for_selector("#logout")
     check("me@example.com" in pg.inner_text("#view"), "ログインできる")
+    n = pg.evaluate("async () => (await import('./js/data.js')).state.problems.length")
+    check(n == len(probs), f"GitHub トークンなしで、ログインだけで問題を読める（{n}問）")
+    figs = pg.evaluate("async () => { const s = await import('./js/store.js'); return !!(await s.get('fig:examples/figures/20261023-denken-01-1.svg')); }")
+    check(figs, "図も Supabase の storage から取得して端末に保存")
+    first = sum(content_gets)
+    pg.evaluate("async () => { const d = await import('./js/data.js'); await d.pull(); }")
+    check(sum(content_gets) == first, f"2回目の同期では、変わっていない問題は取り直さない（{first}→{sum(content_gets)}）")
     pg.screenshot(path=OUT / "06-settings.png", full_page=True)
 
     pg.click(".tabs button[data-go=home]")

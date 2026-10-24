@@ -71,8 +71,8 @@ export function buildStates(attempts, problemsById) {
   return states;
 }
 
-// 今日の出題リスト：期限切れ（古い順）→ 未出題（登録の古い順）
-export function todayQueue(problems, states, { today = ymd(), limit = 20, doneToday = 0 } = {}) {
+// 今日の出題リスト：期限切れ（古い順）→ 未出題（登録の古い順）。1日の上限はない（limit は絞り込み用）
+export function todayQueue(problems, states, { today = ymd(), limit = Infinity, doneToday = 0 } = {}) {
   const due = problems
     .filter((p) => states[p.id] && states[p.id].due <= today && states[p.id].lastDay !== today)
     .sort((a, b) => (states[a.id].due < states[b.id].due ? -1 : 1));

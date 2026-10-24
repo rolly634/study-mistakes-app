@@ -5,7 +5,7 @@ import * as tracker from "./tracker.js";
 import { buildStates, todayQueue, ymd, daysBetween, EXAMS } from "./srs.js";
 import { rich, inline, escapeHTML as esc } from "./render.js";
 
-export const VERSION = "0.6.0";
+export const VERSION = "0.7.0";
 const SUBJECTS = ["数学", "物理", "英語", "電験"];
 const LAB = "ABCDE";
 const STATUS = {
@@ -321,12 +321,12 @@ function home() {
   view.innerHTML = "";
 
   if (!ps.length) {
-    const ready = s.demo || (s.token && supa.user());
+    const ready = s.demo || supa.user();
     view.innerHTML = `
       <div class="card">
         <h3 style="margin-top:0">はじめに</h3>
         <p class="note">${ready ? "まだ問題がありません。右上が「同期」になってから、もう一度開いてください。"
-          : "設定で GitHub のトークンを入力し、進捗管理アプリと同じアカウントでログインしてください。先に見本で操作を試すこともできます。"}</p>
+          : "設定で、進捗管理アプリと同じアカウントでログインしてください。先に見本で操作を試すこともできます。"}</p>
         ${ready ? '<button class="btn" id="pull">今すぐ同期</button>' : '<button class="btn" id="toSettings">設定を開く</button><button class="btn ghost" id="demo">見本で試す</button>'}
       </div>`;
     $("#pull")?.addEventListener("click", async () => { await sync(); home(); });
@@ -338,10 +338,8 @@ function home() {
   const wc = waitingCard();
   if (wc) view.append(wc);
   view.append(filterChips(home));
-  const limit = Number(s.dailyLimit) || 20;
   const done = doneToday();
-  const q = todayQueue(pool(), states, { limit, doneToday: done });
-  const dueAll = todayQueue(pool(), states, { limit: 9999 }).length;
+  const q = todayQueue(pool(), states);
   const exam = ui.subject === "電験" ? ["電験", EXAMS.電験] : ["入試", EXAMS.入試];
 
   const hero = document.createElement("div");
@@ -349,7 +347,7 @@ function home() {
   hero.innerHTML = `
     <div class="lbl">今日の復習${filterLabel() ? `（${filterLabel()}）` : ""}</div>
     <div class="big">${q.length}<small style="font-size:18px">問</small></div>
-    <div class="lbl">今日解いた問題 ${done} ／ 上限 ${limit}${dueAll > q.length ? `　残り ${dueAll - q.length}問は明日以降` : ""}</div>
+    <div class="lbl">今日解いた問題 ${done}</div>
     <div class="lbl">${exam[0]}まで あと${daysBetween(ymd(), exam[1])}日</div>
     <button class="btn" id="start" ${q.length ? "" : "disabled"}>${q.length ? "始める" : "今日の分は終わりました"}</button>`;
   view.append(hero);
@@ -360,7 +358,7 @@ function home() {
   for (const sub of SUBJECTS) {
     const all = ps.filter((p) => p.subject === sub);
     const list = all.filter((p) => !ui.kind || kindOf(p) === ui.kind);
-    const due = todayQueue(list, states, { limit: 9999 }).length;
+    const due = todayQueue(list, states).length;
     const caution = list.filter((p) => states[p.id]?.status === "caution").length;
     const ok = list.filter((p) => states[p.id]?.status === "teichaku").length;
     const c = document.createElement("button");
@@ -577,7 +575,7 @@ async function card(p, { onNext, progress, nextLabel = "次へ" }) {
         <small>${multi ? "全小問正解で「解けた」　" : ""}${st?.status === "teichaku" ? "定着（2回続けて解けた）　" : st?.status === "caution" ? "要注意（2回続けて解けなかった）　" : ""}次は${nextDays <= 1 ? "明日" : `${nextDays}日後`}</small></div>
       ${body}
       ${tail}
-      ${p.originals?.length && data.canGitHub() ? '<div class="photo"><button class="chip" id="photo">元の写真を見る</button><div id="photos"></div></div>' : ""}
+      ${p.originals?.length && data.canPhotos() ? '<div class="photo"><button class="chip" id="photo">元の写真を見る</button><div id="photos"></div></div>' : ""}
       <div class="next"><button class="btn" id="next">${nextLabel}</button></div>`;
     $("#noteBtn", a)?.addEventListener("click", async () => {
       const nb = $("#noteBox", a);
@@ -730,7 +728,7 @@ async function noteView(id) {
   view.innerHTML = `<div class="card c-${n.subject}">
       <div class="meta"><span class="badge">疑問</span><b>${n.subject}</b><span>${n.week}</span><span>${md(n.date)}</span>${star("note", n.id)}</div>
       ${noteHTML(n)}
-      ${n.originals?.length && data.canGitHub() ? '<div class="photo"><button class="chip" id="photo">質問の画像を見る</button><div id="photos"></div></div>' : ""}
+      ${n.originals?.length && data.canPhotos() ? '<div class="photo"><button class="chip" id="photo">質問の画像を見る</button><div id="photos"></div></div>' : ""}
       <div class="row" style="margin-top:12px"><button class="btn ${st === "fukushu" ? "" : "ghost"}" id="toF" style="margin:0">復習中</button><button class="btn ${st === "teichaku" ? "" : "ghost"}" id="toT" style="margin:0">定着</button></div>
     </div>
     <div class="list"><h3>このノートの問題（${n.problems.length}問）</h3></div>
@@ -855,17 +853,16 @@ function settingsView() {
         <label class="f">パスワード</label><input class="f" id="pw" type="password" autocomplete="current-password">
         <button class="btn" id="login">ログイン</button>`}
     </div>
-    <div class="card">
-      <h3 style="margin-top:0">問題の読み込み（GitHub）</h3>
+    <details class="card">
+      <summary><b>旧方式：GitHub から直接読む（ふだんは不要）</b></summary>
+      <p class="note">問題・図・元の写真は、ログインすれば Supabase から読みます。トークンは、ログインしていないときに GitHub から直接読むためだけのものです。</p>
       <label class="f">リポジトリ（所有者 / 名前）</label>
       <div class="row"><input class="f" id="owner" value="${esc(s.owner)}" autocapitalize="off"><input class="f" id="repo" value="${esc(s.repo)}" autocapitalize="off"></div>
       <label class="f">トークン（fine-grained、Contents の読み取り）</label>
       <input class="f" id="token" type="password" value="${esc(s.token)}" placeholder="github_pat_..." autocomplete="off">
       <p class="note">トークンはこの端末の中だけに保存します。</p>
-      <label class="f">1日の上限（問）</label>
-      <input class="f" id="limit" type="number" min="5" max="100" value="${esc(s.dailyLimit)}">
       <button class="btn" id="save">保存して接続を確認</button>
-    </div>
+    </details>
     <div class="card">
       <h3 style="margin-top:0">データ</h3>
       <div class="stat five"><div><b>${data.state.problems.length}</b><span>問題</span></div><div><b>${data.state.notes.length}</b><span>ノート</span></div><div><b>${data.state.attempts.length}</b><span>記録</span></div><div><b>${data.state.ops.length}</b><span>未送信</span></div><div><b>${store.deviceId()}</b><span>端末ID</span></div></div>
@@ -899,7 +896,6 @@ function settingsView() {
   $("#save").onclick = async () => {
     const n = store.saveSettings({
       owner: $("#owner").value.trim(), repo: $("#repo").value.trim(), token: $("#token").value.trim(),
-      dailyLimit: Math.max(5, Math.min(100, Number($("#limit").value) || 20)),
     });
     if (!n.token) return toast("保存しました");
     try {
