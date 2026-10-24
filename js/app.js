@@ -5,7 +5,7 @@ import * as tracker from "./tracker.js";
 import { buildStates, todayQueue, ymd, daysBetween, EXAMS } from "./srs.js";
 import { rich, inline, escapeHTML as esc } from "./render.js";
 
-export const VERSION = "0.5.0";
+export const VERSION = "0.6.0";
 const SUBJECTS = ["数学", "物理", "英語", "電験"];
 const LAB = "ABCDE";
 const STATUS = {
@@ -123,6 +123,132 @@ function wireStars(root) {
       schedulePush();
     };
   });
+}
+
+// ---------- Claude に送る ----------
+const INBOX_STATUS = { new: ["未対応", "st-mid"], done: ["対応済み", "st-ok"], skipped: ["見送り", "st-new"] };
+const PLACEHOLDER = {
+  unsorted: "Claude に送る内容（修正してほしい箇所、質問、メモなど）",
+  fix: "どこを、どう直すか（例：(2) の解説の 50 m は 48 m では？）",
+  question: "知りたいこと（調べものとしてノートと問題になります）",
+  memo: "Claude へのメモ",
+};
+
+// 入力欄。右上の ⋯ で 未分類／修正依頼／質問／メモ を切り替える。target() は送るときに問題・小問を返す
+function composer({ target = null, targetLabel = () => "" } = {}) {
+  const el = document.createElement("div");
+  el.className = "compose";
+  let kind = "unsorted";
+  el.innerHTML = `
+    <div class="ch"><b class="ckind">${data.INBOX_KINDS.unsorted}</b><span class="note">Claude に送る</span>
+      <button class="more" type="button" aria-label="種類を選ぶ" aria-haspopup="true">⋯</button>
+      <div class="menu" hidden>${Object.entries(data.INBOX_KINDS).map(([k, v]) => `<button type="button" data-k="${k}" class="${k === kind ? "on" : ""}">${v}</button>`).join("")}</div></div>
+    <textarea rows="3" maxlength="4000" placeholder="${PLACEHOLDER.unsorted}"></textarea>
+    <div class="crow"><span class="tgt"></span><button class="btn send" type="button">送る</button></div>
+    <p class="note" style="margin:4px 0 0">毎晩まとめて Claude が対応し、結果は「送ったもの」に出ます。</p>`;
+  const menu = $(".menu", el);
+  const ta = $("textarea", el);
+  const showTarget = () => { $(".tgt", el).textContent = targetLabel(); };
+  showTarget();
+  $(".more", el).onclick = (ev) => { ev.stopPropagation(); menu.hidden = !menu.hidden; };
+  menu.querySelectorAll("button").forEach((b) => {
+    b.onclick = () => {
+      kind = b.dataset.k;
+      $(".ckind", el).textContent = data.INBOX_KINDS[kind];
+      menu.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+      ta.placeholder = PLACEHOLDER[kind];
+      menu.hidden = true;
+      ta.focus();
+    };
+  });
+  el.addEventListener("focusin", showTarget);
+  $(".send", el).onclick = async () => {
+    const body = ta.value.trim();
+    if (!body) return toast("内容を書いてください");
+    if (store.settings().demo) return toast("見本モードでは送れません");
+    if (!supa.user()) return toast("設定でログインしてから送ってください");
+    await data.sendInbox({ kind, body, ...(target ? target() : {}) });
+    schedulePush();
+    ta.value = "";
+    kind = "unsorted";
+    $(".ckind", el).textContent = data.INBOX_KINDS.unsorted;
+    ta.placeholder = PLACEHOLDER.unsorted;
+    menu.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x.dataset.k === "unsorted"));
+    toast("送りました。今夜まとめて対応します");
+  };
+  return el;
+}
+
+function inboxView() {
+  tracker.stop();
+  header("送ったもの", true);
+  tab("home");
+  const list = data.state.inbox;
+  view.innerHTML = "";
+  view.append(composer());
+  if (!list.length) {
+    view.insertAdjacentHTML("beforeend", '<div class="empty">まだ何も送っていません。<br>問題やノートの ✉ からも送れます。</div>');
+    return;
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "inbox";
+  for (const x of list) {
+    const [st, cls] = INBOX_STATUS[x.status] || INBOX_STATUS.new;
+    const tgt = x.target_id ? `${x.target_type === "note" ? "ノート" : "問題"} ${x.target_id}${x.part ? " " + x.part : ""}` : "";
+    const it = document.createElement("div");
+    it.className = "card msg";
+    it.innerHTML = `
+      <div class="mh"><span class="pill ${cls}">${st}</span><b>${data.INBOX_KINDS[x.kind] || ""}</b><small>${new Date(x.sent_at).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</small></div>
+      ${tgt ? `<a class="mt" href="#${x.target_type}/${encodeURIComponent(x.target_id)}">${esc(tgt)}</a>` : ""}
+      <div class="mb">${esc(x.body)}</div>
+      ${x.reply ? `<div class="reply"><b>Claude</b>　${esc(x.reply)}</div>` : ""}
+      ${x.status === "new" ? `<button class="chip" data-cancel="${esc(x.id)}">取り消す</button>` : ""}`;
+    wrap.append(it);
+  }
+  view.append(wrap);
+  wrap.querySelectorAll("[data-cancel]").forEach((b) => {
+    b.onclick = async () => {
+      if (!window.confirm("この送信を取り消しますか？")) return;
+      await data.cancelInbox(b.dataset.cancel);
+      schedulePush();
+      inboxView();
+    };
+  });
+}
+
+// ---------- アプリとしてインストール ----------
+let installEvt = null;
+const standalone = () => window.matchMedia?.("(display-mode: standalone)").matches || navigator.standalone === true;
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  installEvt = e;
+  if (/^#?(home|settings)?$/.test(location.hash)) route();
+});
+window.addEventListener("appinstalled", () => {
+  installEvt = null;
+  toast("インストールしました。ホーム画面から開けます");
+  if (/^#?(home|settings)?$/.test(location.hash)) route();
+});
+
+// インストール済み（ホーム画面から開いている）なら出さない
+function installButton() {
+  if (standalone()) return null;
+  const b = document.createElement("button");
+  b.className = "btn ghost install";
+  b.id = "install";
+  b.textContent = "📲 アプリとしてインストール";
+  b.onclick = async () => {
+    if (installEvt) {
+      installEvt.prompt();
+      const r = await installEvt.userChoice.catch(() => null);
+      if (r?.outcome === "accepted") installEvt = null;
+      return;
+    }
+    toast(isIOS() ? "Safari の共有ボタン（□↑）→「ホーム画面に追加」でインストールできます"
+      : "ブラウザのメニュー（⋮）→「アプリをインストール」または「ホーム画面に追加」を選んでください", 6000);
+  };
+  return b;
 }
 
 // ---------- 同期 ----------
@@ -253,12 +379,25 @@ function home() {
   foot.style.marginTop = "12px";
   foot.innerHTML = `<div class="row"><button class="btn ghost" id="bm" style="margin:0">★ ブックマーク（${bms.length}）</button><button class="btn ghost" id="weak" style="margin:0">前回解けなかった（${missed.length}）</button></div>
     <div class="row" style="margin-top:8px"><button class="btn ghost" id="sort" style="margin:0">疑問ノートを仕分ける</button><button class="btn ghost" id="sync2" style="margin:0">同期</button></div>
+    <div class="row" style="margin-top:8px"><button class="btn ghost" id="inboxBtn" style="margin:0">✉ 送ったもの${pendingInbox() ? `（未対応 ${pendingInbox()}）` : ""}</button></div>
     <p class="note" style="margin:8px 0 0">${s.demo ? "見本モードです。設定で解除できます。" : data.state.lastSync ? `最終同期 ${new Date(data.state.lastSync).toLocaleString("ja-JP")}` : ""}</p>`;
   view.append(foot);
   $("#bm").onclick = () => (bms.length ? startSession(bms, "ブックマーク") : toast("ブックマークした問題はありません"));
   $("#weak").onclick = () => (missed.length ? startSession(missed, "前回解けなかった問題") : toast("前回解けなかった問題はありません"));
   $("#sort").onclick = () => startDeck();
   $("#sync2").onclick = async () => { await sync(); home(); };
+  $("#inboxBtn").onclick = () => go("inbox");
+  const ib = installButton();
+  if (ib) foot.prepend(ib);
+  const c = document.createElement("div");
+  c.className = "card";
+  c.style.marginTop = "12px";
+  c.append(composer());
+  view.append(c);
+}
+
+function pendingInbox() {
+  return data.state.inbox.filter((x) => x.status === "new").length;
 }
 
 // ---------- 出題 ----------
@@ -334,14 +473,25 @@ async function card(p, { onNext, progress, nextLabel = "次へ" }) {
   box.innerHTML = `
     ${progress != null ? `<div class="progress"><i style="width:${progress}%"></i></div>` : ""}
     <div class="card c-${p.subject}" data-pid="${esc(p.id)}">
-      <div class="meta">${inquiry ? '<span class="badge">調べもの</span>' : ""}<b>${p.subject}</b><span>${p.week}</span><span>${esc(srcText(p))}</span><span class="topic">${esc(p.topic)}</span>${multi ? `<span>小問${ps.length}</span>` : ""}${statusPill(p.id)}${star("problem", p.id)}</div>
+      <div class="meta">${inquiry ? '<span class="badge">調べもの</span>' : ""}<b>${p.subject}</b><span>${p.week}</span><span>${esc(srcText(p))}</span><span class="topic">${esc(p.topic)}</span>${multi ? `<span>小問${ps.length}</span>` : ""}${statusPill(p.id)}${star("problem", p.id)}<button class="mail" id="mailBtn" aria-label="Claude に送る">✉</button></div>
       <div class="q">${rich(p.question)}</div>
       <div id="figs"></div>
       <div id="parts"></div>
       <div id="answer"></div>
+      <div id="composeBox" hidden></div>
     </div>`;
   view.append(box);
   wireStars(box);
+  let curPart = null; // 送るときに付ける小問（いま答えている小問）
+  const cb = $("#composeBox", box);
+  cb.append(composer({
+    target: () => ({ target_type: "problem", target_id: p.id, part: multi ? curPart : null }),
+    targetLabel: () => `${p.topic}${multi && curPart ? " " + curPart : ""}`,
+  }));
+  $("#mailBtn", box).onclick = () => {
+    cb.hidden = !cb.hidden;
+    if (!cb.hidden) { cb.scrollIntoView({ behavior: "smooth", block: "center" }); $("textarea", cb).focus(); }
+  };
   window.scrollTo(0, 0);
   $("#figs", box).innerHTML = await figuresHTML(p);
 
@@ -351,6 +501,7 @@ async function card(p, { onNext, progress, nextLabel = "次へ" }) {
 
   async function showPart(k) {
     const x = ps[k];
+    curPart = x.label || null;
     const el = document.createElement("div");
     el.className = multi ? "part" : "";
     el.dataset.part = k;
@@ -582,13 +733,15 @@ async function noteView(id) {
       ${n.originals?.length && data.canGitHub() ? '<div class="photo"><button class="chip" id="photo">質問の画像を見る</button><div id="photos"></div></div>' : ""}
       <div class="row" style="margin-top:12px"><button class="btn ${st === "fukushu" ? "" : "ghost"}" id="toF" style="margin:0">復習中</button><button class="btn ${st === "teichaku" ? "" : "ghost"}" id="toT" style="margin:0">定着</button></div>
     </div>
-    <div class="list"><h3>このノートの問題（${n.problems.length}問）</h3></div>`;
+    <div class="list"><h3>このノートの問題（${n.problems.length}問）</h3></div>
+    <div class="card" id="noteCompose"></div>`;
   wireStars(view);
   await fillNoteFigures(view, n);
   $("#photo")?.addEventListener("click", (ev) => showPhotos(ev.target, $("#photos"), n.originals));
   const setSt = async (s) => { await data.setNoteStatus(n.id, s); schedulePush(); noteView(id); };
   $("#toF").onclick = () => setSt("fukushu");
   $("#toT").onclick = () => setSt("teichaku");
+  $("#noteCompose").append(composer({ target: () => ({ target_type: "note", target_id: n.id }), targetLabel: () => n.title }));
   const wrap = $(".list", view);
   for (const pid of n.problems) {
     const p = data.state.byId[pid];
@@ -721,7 +874,12 @@ function settingsView() {
       <button class="btn ghost" id="reset" style="color:var(--ng);border-color:var(--ng)">端末内のデータを消す</button>
       <p class="note">消しても、送信済みの記録は次の同期で戻ります（未送信の分は消えます）。</p>
     </div>
+    <div class="card" id="installCard"><h3 style="margin-top:0">アプリとしてインストール</h3>
+      <p class="note">ホーム画面にアイコンができ、ブラウザの枠なしで開けます。オフラインでも使えます。</p></div>
     <p class="note" style="text-align:center">誤答トレーニング v${VERSION}</p>`;
+  const ib = installButton();
+  if (ib) $("#installCard").append(ib);
+  else $("#installCard").insertAdjacentHTML("beforeend", '<p><b>インストール済み</b>（ホーム画面から開いています）</p>');
   $("#login")?.addEventListener("click", async () => {
     try {
       await supa.signIn($("#email").value.trim(), $("#pw").value);
@@ -784,6 +942,7 @@ function route() {
   else if (h === "settings") settingsView();
   else if (h === "review") review();
   else if (h === "sort") deck();
+  else if (h === "inbox") inboxView();
   else if (h.startsWith("problem/")) single(h.slice(8));
   else if (h.startsWith("note/")) noteView(h.slice(5));
   else home();
@@ -795,9 +954,13 @@ $("#back").onclick = () => {
   if (ui.session && !window.confirm("復習を中断しますか？（答えた分は保存済み）")) return;
   ui.session = null;
   if (/^#(problem|note)\//.test(location.hash)) history.back();
+  else if (location.hash === "#inbox") go("home");
   else { ui.deck = null; go(location.hash === "#sort" ? "list" : "home"); }
 };
 window.addEventListener("hashchange", route);
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".compose .ch")) document.querySelectorAll(".compose .menu").forEach((m) => { m.hidden = true; });
+});
 window.addEventListener("online", () => schedulePush());
 // 活動中の画面（出題・ノート・仕分け）での操作を復習時間として数える
 for (const ev of ["pointerdown", "keydown"]) {

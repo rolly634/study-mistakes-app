@@ -14,7 +14,7 @@
 ```
 index.html, manifest.webmanifest, sw.js   PWA 本体（sw.js がアプリ本体をキャッシュ）
 css/app.css                               スマホ幅前提、ダークモード対応
-js/app.js      画面（ホーム・出題・一覧・疑問ノート・仕分け・設定）と遷移（#home, #list, #settings, #review, #sort, #problem/<id>, #note/<id>）
+js/app.js      画面（ホーム・出題・一覧・疑問ノート・仕分け・送ったもの・設定）と遷移（#home, #list, #settings, #review, #sort, #inbox, #problem/<id>, #note/<id>）。Claude に送る欄（⋯で 未分類／修正依頼／質問／メモ）、インストールボタン
 js/data.js     問題・図（GitHub）と、記録・ブックマーク・ノートの仕分け・写真待ち（Supabase）の取得と送信。送信は ops に積んで順に送る
 js/github.js   GitHub Contents API（raw 取得）
 js/supa.js     Supabase の最小クライアント（fetch のみ。メール＋パスワードでログイン、REST）
@@ -30,8 +30,8 @@ tests/         Playwright の動作テスト
 
 - GitHub（読むだけ）：`index/problems.json`（`problems` と `notes`）、`figures/*.svg`、`originals/*.jpg`（ボタンを押したときだけ）
 - Supabase（本人の行だけ読み書き）
-  - 書く：`attempts`（problem_id, solved, chosen, at, device。id は端末で作る uuid）、`sessions`（subject=review, source=mistakes, id=`mistakes-<uuid>`）、`bookmarks`、`note_status`（teichaku／fukushu）、`photo_dismissed`（mark_id）
-  - 読む：上の表と、ビュー `photo_waiting`
+  - 書く：`attempts`（problem_id, solved, chosen, parts, at, device。id は端末で作る uuid）、`inbox`（Claude に送る。id, kind, body, target_type, target_id, part, sent_at。未対応のものは取り消し＝DELETE できる）、`sessions`（subject=review, source=mistakes, id=`mistakes-<uuid>`）、`bookmarks`、`note_status`（teichaku／fukushu）、`photo_dismissed`（mark_id）
+  - 読む：上の表（inbox は status・reply も）と、ビュー `photo_waiting`
 - 問題の `kind` が `inquiry` なら調べもの（`point` と `note` を表示に使う）。省略時は誤答
 - 状態（次回日・定着・要注意）は保存せず、毎回 attempts を時刻順に再生して計算する（DB 側のビュー `problem_status` と同じ規則）
 

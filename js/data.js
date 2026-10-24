@@ -15,6 +15,7 @@ export const state = {
   bookmarks: {},    // { "problem:<id>" / "note:<id>": true }
   noteStatus: {},   // { note_id: "teichaku" | "fukushu" }
   waiting: [],      // 写真待ち {mark_id, item_id, label, subject, marked_on}
+  inbox: [],        // Claude に送ったもの {id, kind, body, target_type, target_id, part, status, reply, sent_at, done_at}
   ops: [],          // まだ送っていない操作
   lastSync: null,
 };
@@ -59,6 +60,7 @@ export async function loadLocal() {
   state.bookmarks = await store.get(n + "bookmarks", {});
   state.noteStatus = await store.get(n + "noteStatus", {});
   state.waiting = await store.get(n + "waiting", []);
+  state.inbox = await store.get(n + "inbox", []);
   state.ops = await store.get(n + "ops", []);
   state.lastSync = await store.get(n + "lastSync", null);
 }
@@ -69,6 +71,7 @@ async function save() {
   await store.set(n + "bookmarks", state.bookmarks);
   await store.set(n + "noteStatus", state.noteStatus);
   await store.set(n + "waiting", state.waiting);
+  await store.set(n + "inbox", state.inbox);
   await store.set(n + "ops", state.ops);
 }
 
@@ -108,17 +111,19 @@ async function pullSupa(onStep) {
   if (!canSupa()) return false;
   await flush(onStep);
   onStep("記録を取得中");
-  const [att, bm, nst, wait] = await Promise.all([
+  const [att, bm, nst, wait, inbox] = await Promise.all([
     supa.rest("attempts?select=id,problem_id,solved,chosen,parts,at,device&order=at"),
     supa.rest("bookmarks?select=target_type,target_id"),
     supa.rest("note_status?select=note_id,status"),
     supa.rest("photo_waiting?select=mark_id,item_id,label,subject,marked_on&order=marked_on"),
+    supa.rest("inbox?select=id,kind,body,target_type,target_id,part,status,reply,sent_at,done_at&order=sent_at.desc&limit=200"),
   ]);
   if (state.ops.length) return true; // 取得中に新しい操作があれば次の同期で取り込む
   state.attempts = att;
   state.bookmarks = Object.fromEntries(bm.map((b) => [`${b.target_type}:${b.target_id}`, true]));
   state.noteStatus = Object.fromEntries(nst.map((x) => [x.note_id, x.status]));
   state.waiting = wait;
+  state.inbox = inbox;
   await save();
   return true;
 }
@@ -147,6 +152,10 @@ async function sendOp(op) {
       return supa.rest(`bookmarks?target_type=eq.${encodeURIComponent(op.type)}&target_id=eq.${encodeURIComponent(op.id)}`, { method: "DELETE" });
     case "note":
       return supa.rest("note_status?on_conflict=user_id,note_id", { method: "POST", body: [{ note_id: op.id, status: op.status, updated_at: op.at }], prefer: "resolution=merge-duplicates,return=minimal" });
+    case "inbox":
+      return supa.rest("inbox?on_conflict=id", { method: "POST", body: [op.row], prefer: "resolution=ignore-duplicates,return=minimal" });
+    case "inbox_del":
+      return supa.rest(`inbox?id=eq.${encodeURIComponent(op.id)}&status=eq.new`, { method: "DELETE" });
     case "dismiss":
       return supa.rest("photo_dismissed?on_conflict=user_id,mark_id", { method: "POST", body: [{ mark_id: op.id }], prefer: "resolution=ignore-duplicates,return=minimal" });
     default:
@@ -223,6 +232,25 @@ export async function dismissWaiting(markIds) {
   await save();
 }
 
+// ---------- Claude に送る（受信箱） ----------
+export const INBOX_KINDS = { unsorted: "未分類", fix: "修正依頼", question: "質問", memo: "メモ" };
+
+export async function sendInbox({ kind = "unsorted", body, target_type = null, target_id = null, part = null }) {
+  const row = { id: uuid(), kind, body, target_type, target_id, part, sent_at: new Date().toISOString() };
+  state.inbox.unshift({ ...row, status: "new", reply: null, done_at: null });
+  await queue({ k: "inbox", row });
+  return row;
+}
+
+// まだ Claude が対応していないものだけ取り消せる。未送信ならその場で消す
+export async function cancelInbox(id) {
+  state.inbox = state.inbox.filter((x) => x.id !== id);
+  const before = state.ops.length;
+  state.ops = state.ops.filter((o) => !(o.k === "inbox" && o.row.id === id));
+  if (state.ops.length === before && !demo()) state.ops.push({ k: "inbox_del", id });
+  await save();
+}
+
 // ---------- 図と写真 ----------
 export async function figureURL(file) {
   const k = demo() ? "fig:demo/" + file : "fig:" + file;
@@ -245,5 +273,5 @@ export async function originalURL(path) {
 
 export async function resetLocal() {
   await store.clearAll();
-  Object.assign(state, { problems: [], byId: {}, notes: [], notesById: {}, attempts: [], bookmarks: {}, noteStatus: {}, waiting: [], ops: [], lastSync: null });
+  Object.assign(state, { problems: [], byId: {}, notes: [], notesById: {}, attempts: [], bookmarks: {}, noteStatus: {}, waiting: [], inbox: [], ops: [], lastSync: null });
 }

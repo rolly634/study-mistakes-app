@@ -1,9 +1,10 @@
-"""誤答トレーニング v0.5.0 の動作テスト（スマホ幅）。
+"""誤答トレーニング v0.6.0 の動作テスト（スマホ幅）。
 
 1. 見本モード：選んだ答えで自動判定 → 解説 → 次へ、小問つき問題（小問ごとに解説→次の小問、全問正解で解けた）、
    ブックマーク、疑問ノートのスワイプ仕分け、間隔反復
 2. 連携モード：GitHub（問題）と Supabase（記録）を偽のサーバーで代用し、ログイン、写真待ちの確認、
-   解いた記録・ブックマーク・ノートの仕分け・復習時間の送信、端末データを消したあとの復元、オフラインを確認
+   解いた記録・ブックマーク・ノートの仕分け・復習時間の送信、Claude に送る（⋯で種類切り替え・問題から・取り消し・返事の表示）、
+   インストールボタン、端末データを消したあとの復元、オフラインを確認
 
     python3 tests/test_app.py [スクリーンショットの出力先]
     （DATA_REPO で study-mistakes の場所を指定。既定は隣のフォルダ）
@@ -85,7 +86,7 @@ def gh(route):
 
 
 # ---- 偽の Supabase ----
-db = {"attempts": [], "sessions": [], "bookmarks": [], "note_status": [], "photo_dismissed": [],
+db = {"attempts": [], "sessions": [], "bookmarks": [], "note_status": [], "photo_dismissed": [], "inbox": [],
       "waiting": [{"mark_id": "m-1", "item_id": "GO1-43", "label": "合格るIAIIB 43", "subject": "math", "marked_on": "2026-10-24"}]}
 
 
@@ -121,6 +122,10 @@ def sb(route):
                 continue
             rows.append(r)
         return route.fulfill(status=201, body="")
+    if req.method == "DELETE" and table == "inbox":
+        i = q["id"][0].removeprefix("eq.")
+        rows[:] = [x for x in rows if not (x["id"] == i and x.get("status", "new") == "new")]
+        return route.fulfill(status=204, body="")
     if req.method == "DELETE":
         t = q["target_type"][0].removeprefix("eq.")
         i = q["target_id"][0].removeprefix("eq.")
@@ -271,6 +276,42 @@ with sync_playwright() as pw:
     pg.wait_for_timeout(2000)
     check(db["photo_dismissed"] == [{"mark_id": "m-1"}], f"「確認した」が送られる {db['photo_dismissed']}")
 
+    # ---- Claude に送る（ホーム：⋯で種類を切り替える） ----
+    check(pg.locator(".compose .ckind").first.inner_text() == "未分類", "送る欄は未分類から始まる")
+    pg.locator(".compose .more").first.click()
+    check(pg.locator(".compose .menu button").count() == 4, "⋯で4種類（未分類・修正依頼・質問・メモ）")
+    pg.screenshot(path=OUT / "08-compose-menu.png", full_page=True)
+    pg.locator(".compose .menu button[data-k=fix]").first.click()
+    check(pg.locator(".compose .ckind").first.inner_text() == "修正依頼", "修正依頼に切り替わる")
+    pg.locator(".compose textarea").first.fill("見本の問題の表記を直してほしい")
+    pg.locator(".compose .send").first.click()
+    pg.wait_for_function("() => document.querySelector('#toast').textContent.includes('送りました')")
+    check(pg.locator(".compose .ckind").first.inner_text() == "未分類", "送ったあとは未分類に戻る")
+    pg.wait_for_timeout(2000)
+    check(len(db["inbox"]) == 1 and db["inbox"][0]["kind"] == "fix" and db["inbox"][0]["target_id"] is None, f"修正依頼が受信箱に送られる {db['inbox']}")
+    # 未分類のまま送り、すぐ取り消す
+    pg.locator(".compose textarea").first.fill("やっぱり取り消すメモ")
+    pg.locator(".compose .send").first.click()
+    pg.wait_for_timeout(2000)
+    check(len(db["inbox"]) == 2 and db["inbox"][1]["kind"] == "unsorted", "未分類のまま送れる")
+    pg.click("#inboxBtn")
+    pg.wait_for_selector(".msg")
+    check(pg.locator(".msg").count() == 2, "送ったものの一覧に2件")
+    pg.locator(".msg").filter(has_text="取り消す").first.locator("[data-cancel]").click()
+    pg.wait_for_timeout(2000)
+    check(len(db["inbox"]) == 1 and pg.locator(".msg").count() == 1, f"未対応のものを取り消せる {len(db['inbox'])}")
+    # Claude の返事が一覧に出る
+    db["inbox"][0].update(status="done", reply="問題文の表記を直しました。")
+    pg.evaluate("async () => { const d = await import('./js/data.js'); await d.pull(); }")
+    pg.goto(f"http://localhost:{PORT}/#home")
+    pg.wait_for_selector("#inboxBtn")
+    pg.goto(f"http://localhost:{PORT}/#inbox")
+    pg.wait_for_selector(".msg .reply")
+    check("対応済み" in pg.inner_text(".msg") and "直しました" in pg.inner_text(".msg .reply"), "対応済みと Claude の返事が出る")
+    pg.screenshot(path=OUT / "09-inbox.png", full_page=True)
+    pg.goto(f"http://localhost:{PORT}/#home")
+    pg.wait_for_selector("#start")
+
     pg.click("#start")
     for want in [False, True]:
         pg.wait_for_selector(".choice:not([disabled])")
@@ -279,11 +320,18 @@ with sync_playwright() as pw:
         pg.wait_for_selector(".verdict")
         if not want:
             pg.click(".meta .star")
+            pg.click("#mailBtn")
+            pg.fill("#composeBox textarea", "この問題の選択肢が紛らわしい")
+            pg.click("#composeBox .send")
+            pg.wait_for_function("() => document.querySelector('#toast').textContent.includes('送りました')")
         pg.click("#next")
         pg.wait_for_timeout(300)
     pg.wait_for_timeout(2000)
     check(len(db["attempts"]) == 2 and [a["solved"] for a in db["attempts"]] == [False, True], f"解いた記録が2件送られる {[a.get('solved') for a in db['attempts']]}")
     check(len(db["bookmarks"]) == 1 and db["bookmarks"][0]["target_type"] == "problem", f"ブックマークが送られる {db['bookmarks']}")
+    fromp = [x for x in db["inbox"] if x.get("target_type") == "problem"]
+    check(len(fromp) == 1 and fromp[0]["target_id"] == db["attempts"][0]["problem_id"], f"問題の ✉ から送ると問題 id が付く {fromp}")
+
 
     # 復習時間（6分前から活動していたことにして、ホームに戻る）
     pg.evaluate("""async () => {
@@ -299,6 +347,16 @@ with sync_playwright() as pw:
         from datetime import datetime
         dur = (datetime.fromisoformat(ss[-1]["ended_at"].replace("Z", "+00:00")) - datetime.fromisoformat(ss[-1]["started_at"].replace("Z", "+00:00"))).total_seconds() / 60
         check(5.5 <= dur <= 7, f"復習時間の長さ（約6分）：{dur:.1f}分")
+
+    # インストールボタン（beforeinstallprompt を受けたらブラウザのダイアログを出す）
+    pg.goto(f"http://localhost:{PORT}/#home")
+    pg.wait_for_selector("#install")
+    pg.evaluate("""() => { const e = new Event('beforeinstallprompt'); window.__prompted = 0;
+      e.prompt = () => { window.__prompted++; }; e.userChoice = Promise.resolve({ outcome: 'accepted' }); window.dispatchEvent(e); }""")
+    pg.wait_for_selector("#install")
+    pg.click("#install")
+    pg.wait_for_timeout(300)
+    check(pg.evaluate("() => window.__prompted") == 1, "インストールボタンでインストールのダイアログが出る")
 
     # 疑問ノートの仕分けをボタンで（左＝復習中）
     pg.goto(f"http://localhost:{PORT}/#list")

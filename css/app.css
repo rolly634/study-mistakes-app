@@ -163,3 +163,26 @@ input.f, select.f { width: 100%; font: inherit; padding: 10px 12px; border: 1.5p
 .presum span { border-radius: 999px; padding: 2px 10px; font-weight: 700; font-size: 14px; }
 .presum .ok { background: var(--ok-bg); color: var(--ok); } .presum .ng { background: var(--ng-bg); color: var(--ng); }
 .np { font-weight: 400; color: var(--sub); font-size: 12px; margin-left: 6px; }
+/* Claude に送る */
+.compose { margin-top: 12px; }
+.compose .ch { position: relative; display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.compose .ckind { color: var(--accent); }
+.compose .ch .note { margin: 0; }
+.compose .more { margin-left: auto; border: 1.5px solid var(--line); background: var(--card); color: var(--ink); border-radius: 999px; width: 40px; height: 30px; font-size: 18px; line-height: 1; letter-spacing: 1px; }
+.compose .menu { position: absolute; right: 0; top: 34px; z-index: 5; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 20px rgba(0,0,0,.18); display: grid; min-width: 140px; overflow: hidden; }
+.compose .menu[hidden] { display: none; }
+.compose .menu button { text-align: left; padding: 10px 14px; border: 0; background: none; color: var(--ink); font-size: 15px; }
+.compose .menu button.on { font-weight: 700; color: var(--accent); }
+.compose .menu button + button { border-top: 1px solid var(--line); }
+.compose textarea { width: 100%; box-sizing: border-box; border: 1.5px solid var(--line); border-radius: 10px; padding: 10px; font: inherit; font-size: 15px; background: var(--bg); color: var(--ink); resize: vertical; }
+.compose .crow { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.compose .crow .tgt { flex: 1; font-size: 12px; color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.compose .send { width: auto; margin: 0; padding: 8px 22px; }
+.mail { border: 0; background: none; font-size: 18px; color: var(--sub); padding: 0 2px; margin-left: 4px; }
+#composeBox { border-top: 1.5px dashed var(--line); margin-top: 14px; }
+.inbox .msg { margin-top: 10px; }
+.msg .mh { display: flex; align-items: center; gap: 8px; } .msg .mh small { margin-left: auto; color: var(--sub); }
+.msg .mt { display: block; font-size: 12px; color: var(--accent); margin-top: 4px; }
+.msg .mb { white-space: pre-wrap; margin: 6px 0; }
+.msg .reply { border-left: 4px solid var(--accent); padding: 6px 10px; background: color-mix(in srgb, var(--accent) 8%, var(--card)); border-radius: 0 8px 8px 0; white-space: pre-wrap; margin-bottom: 6px; }
+.install { margin-top: 8px; }
