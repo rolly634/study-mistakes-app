@@ -5,7 +5,7 @@ import * as tracker from "./tracker.js";
 import { buildStates, todayQueue, ymd, daysBetween, EXAMS } from "./srs.js";
 import { rich, inline, escapeHTML as esc } from "./render.js";
 
-export const VERSION = "0.8.0";
+export const VERSION = "0.9.0";
 const SUBJECTS = ["数学", "物理", "英語", "電験"];
 const LAB = "ABCDE";
 const STATUS = {

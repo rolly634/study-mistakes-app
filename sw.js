@@ -1,5 +1,5 @@
 // オフライン用：アプリ本体を端末に保存する（問題データは IndexedDB 側で保存）
-const VERSION = "v0.8.0";
+const VERSION = "v0.9.0";
 const CACHE = `app-${VERSION}`;
 const KATEX_FONTS = [
   "AMS-Regular", "Caligraphic-Bold", "Caligraphic-Regular", "Fraktur-Bold", "Fraktur-Regular", "Main-Bold",

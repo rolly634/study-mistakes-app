@@ -1,4 +1,4 @@
-"""誤答トレーニング v0.8.0 の動作テスト（スマホ幅）。
+"""誤答トレーニング v0.9.0 の動作テスト（スマホ幅）。
 
 1. 見本モード：選んだ答えで自動判定 → 解説 → 次へ、小問つき問題（小問ごとに解説→次の小問、全問正解で解けた）、
    ブックマーク、疑問ノートのスワイプ仕分け、間隔反復
@@ -172,7 +172,8 @@ with sync_playwright() as pw:
     check(page.inner_text(".hero .big").startswith("7"), "見本7問が今日の復習に入る")
     page.screenshot(path=OUT / "02-home.png", full_page=True)
     page.click("#start")
-    plan = [False, True, True, False, True, False, True]  # 解けた／解けなかったの選び方（6問目が小問つき）
+    plan = [False, True, True, False, True, False, True]  # 解けた／解けなかったの選び方
+    kinds = []
     for i, want in enumerate(plan):
         page.wait_for_selector(".choice:not([disabled])")
         pid = page.get_attribute(".card[data-pid]", "data-pid")
@@ -181,6 +182,7 @@ with sync_playwright() as pw:
         if "電験" in page.inner_text(".meta"):
             labs = page.eval_on_selector_all(".choice .lab", "els => els.map(e => e.textContent)")
             check(labs == ["(1)", "(2)", "(3)", "(4)", "(5)"], f"電験は (1)〜(5) の5択（{topic}）")
+        kinds.append(p.get("kind", "mistake"))
         solve(page, p, want)
         page.wait_for_selector(".verdict")
         if p.get("parts"):
@@ -203,6 +205,7 @@ with sync_playwright() as pw:
         nxt = f"{i + 2}/{len(plan)}"
         page.wait_for_function(f"() => document.querySelector('#title').textContent.includes('{nxt}') || document.body.textContent.includes('おつかれさまでした')")
     page.wait_for_selector("text=おつかれさまでした")
+    check(kinds == sorted(kinds, key=lambda k: k == "inquiry"), f"未出題は誤答が先、調べものが後 {kinds}")
     stat = page.eval_on_selector_all(".stat b", "els => els.map(e => e.textContent)")
     check(stat[:2] == ["4", "3"], f"まとめ：解けた4・解けなかった3 {stat}")
     rec = page.evaluate("async () => (await import('./js/data.js')).state.attempts.find(a => a.problem_id === '20261023-math-02')")
@@ -229,6 +232,14 @@ with sync_playwright() as pw:
     check([x[1] for x in r] == ["learning", "teichaku", "learning", "caution", "learning", "teichaku", "teichaku"], "状態：2回続けて解けた＝定着、2回続けて解けない＝要注意")
 
     check(r[-1][2] == "2027-02-21", "試験前は残り日数の半分が上限（2/11→2/21）")
+    order = page.evaluate("""async () => {
+      const s = await import('./js/srs.js');
+      const P = [{id:'q-old',kind:'inquiry',date:'2026-10-01'},{id:'m-new',date:'2026-10-20'},{id:'q-due',kind:'inquiry',date:'2026-10-02'},
+                 {id:'m-due2',date:'2026-10-03'},{id:'m-due1',date:'2026-10-04'}];
+      const st = {'q-due':{due:'2026-10-20',lastDay:'2026-10-19'},'m-due2':{due:'2026-10-22',lastDay:'2026-10-15'},'m-due1':{due:'2026-10-21',lastDay:'2026-10-14'}};
+      return s.todayQueue(P, st, { today: '2026-10-25' }).map(p => p.id);
+    }""")
+    check(order == ["m-due1", "m-due2", "q-due", "m-new", "q-old"], f"並び：期限の誤答（古い順）→期限の調べもの→未出題の誤答→未出題の調べもの {order}")
 
     page.click("#home")
     page.wait_for_selector("#bm")
@@ -263,7 +274,7 @@ with sync_playwright() as pw:
     auto = page.evaluate("""async () => {
       const d = await import('./js/data.js');
       const n = d.state.notes[0];
-      const t0 = Date.now() - 20 * 86400000;
+      const t0 = Date.now() + 86400000;  // 今日の出題の記録より後に2回続けて解けた
       const s = await import('./js/store.js');
       window.__saved = [...d.state.attempts];
       for (const pid of n.problems) for (const k of [0, 1]) d.state.attempts.push({ id: pid + k, problem_id: pid, solved: true, chosen: 0, at: new Date(t0 + k * 8 * 86400000).toISOString() });

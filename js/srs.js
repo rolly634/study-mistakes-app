@@ -71,13 +71,16 @@ export function buildStates(attempts, problemsById) {
   return states;
 }
 
-// 今日の出題リスト：期限切れ（古い順）→ 未出題（登録の古い順）。1日の上限はない（limit は絞り込み用）
+// 今日の出題リスト。1日の上限はない（limit は絞り込み用）。途中でやめても誤答から片付くよう、次の順に並べる：
+//   期限が来た誤答 → 期限が来た調べもの → 未出題の誤答 → 未出題の調べもの
+//   期限が来たものは期限の古い順、未出題は登録の古い順
 export function todayQueue(problems, states, { today = ymd(), limit = Infinity, doneToday = 0 } = {}) {
+  const inq = (p) => (p.kind === "inquiry" ? 1 : 0);
   const due = problems
     .filter((p) => states[p.id] && states[p.id].due <= today && states[p.id].lastDay !== today)
-    .sort((a, b) => (states[a.id].due < states[b.id].due ? -1 : 1));
+    .sort((a, b) => inq(a) - inq(b) || (states[a.id].due < states[b.id].due ? -1 : states[a.id].due > states[b.id].due ? 1 : 0));
   const fresh = problems.filter((p) => !states[p.id])
-    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id < b.id ? -1 : 1));
+    .sort((a, b) => inq(a) - inq(b) || (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id < b.id ? -1 : 1));
   const room = Math.max(0, limit - doneToday);
   return [...due, ...fresh].slice(0, room);
 }
