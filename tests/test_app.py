@@ -1,6 +1,7 @@
-"""誤答トレーニング v0.4.0 の動作テスト（スマホ幅）。
+"""誤答トレーニング v0.5.0 の動作テスト（スマホ幅）。
 
-1. 見本モード：選んだ答えで自動判定 → 解説 → 次へ、ブックマーク、疑問ノートのスワイプ仕分け、間隔反復
+1. 見本モード：選んだ答えで自動判定 → 解説 → 次へ、小問つき問題（小問ごとに解説→次の小問、全問正解で解けた）、
+   ブックマーク、疑問ノートのスワイプ仕分け、間隔反復
 2. 連携モード：GitHub（問題）と Supabase（記録）を偽のサーバーで代用し、ログイン、写真待ちの確認、
    解いた記録・ブックマーク・ノートの仕分け・復習時間の送信、端末データを消したあとの復元、オフラインを確認
 
@@ -37,7 +38,29 @@ srv = subprocess.Popen([sys.executable, "-m", "http.server", str(PORT), "-d", st
 time.sleep(1)
 
 demo = json.loads((APP / "demo/problems.json").read_text(encoding="utf-8"))
-ANSWER = {p["id"]: p["answer"] for p in demo["problems"]}
+BYID = {p["id"]: p for p in demo["problems"]}
+
+
+def solve(page, p, want):
+    """1問解く。小問つきは小問を順に。want=False なら最初の小問だけ間違え、残りは正解する。"""
+    if not p.get("parts"):
+        page.wait_for_selector(".choice:not([disabled])")
+        if want:
+            page.click(f".choice[data-idx='{p['answer']}']")
+        else:
+            page.locator(f".choice:not([data-idx='{p['answer']}'])").first.click()
+        return
+    for k, x in enumerate(p["parts"]):
+        sel = f".part[data-part='{k}']"
+        page.wait_for_selector(f"{sel} .choice:not([disabled])")
+        if want or k > 0:
+            page.click(f"{sel} .choice[data-idx='{x['answer']}']")
+        else:
+            page.locator(f"{sel} .choice:not([data-idx='{x['answer']}'])").first.click()
+        page.wait_for_selector(f"{sel} .pverdict")
+        if k + 1 < len(p["parts"]):
+            check(page.locator(".verdict").count() == 0, f"小問{x['label']}のあと、まだ全体の判定は出ない")
+            page.click(f"{sel} .pnext")
 
 # ---- 偽の GitHub ----
 probs = [json.loads(f.read_text(encoding="utf-8")) for f in sorted((DATA / "examples/problems").rglob("*.json"))]
@@ -124,23 +147,26 @@ with sync_playwright() as pw:
     page.wait_for_selector("text=はじめに")
     page.click("text=見本で試す")
     page.wait_for_selector("#start")
-    check(page.inner_text(".hero .big").startswith("6"), "見本6問が今日の復習に入る")
+    check(page.inner_text(".hero .big").startswith("7"), "見本7問が今日の復習に入る")
     page.screenshot(path=OUT / "02-home.png", full_page=True)
     page.click("#start")
-    plan = [False, True, True, False, True, True]  # 解けた／解けなかったの選び方
+    plan = [False, True, True, False, True, False, True]  # 解けた／解けなかったの選び方（6問目が小問つき）
     for i, want in enumerate(plan):
         page.wait_for_selector(".choice:not([disabled])")
-        topic = page.inner_text(".meta .topic")
-        pid = next(p["id"] for p in demo["problems"] if p["topic"] == topic)
-        ans = ANSWER[pid]
+        pid = page.get_attribute(".card[data-pid]", "data-pid")
+        p = BYID[pid]
+        topic = p["topic"]
         if "電験" in page.inner_text(".meta"):
             labs = page.eval_on_selector_all(".choice .lab", "els => els.map(e => e.textContent)")
             check(labs == ["(1)", "(2)", "(3)", "(4)", "(5)"], f"電験は (1)〜(5) の5択（{topic}）")
-        if want:
-            page.click(f".choice[data-idx='{ans}']")
-        else:
-            page.locator(f".choice:not([data-idx='{ans}'])").first.click()
+        solve(page, p, want)
         page.wait_for_selector(".verdict")
+        if p.get("parts"):
+            n = len(p["parts"])
+            check(page.locator(".pverdict").count() == n and page.locator(".presum span").count() == n, f"小問{n}つそれぞれに正誤と解説、最後にまとめ")
+            check(page.locator(".pverdict.ng").count() == 1 and page.locator(".pverdict.ok").count() == n - 1, "(1) を間違えても (2)(3) に進める")
+            check(page.locator(".mis").count() >= 1, "間違えた小問の「前回の間違い」が出る")
+            page.screenshot(path=OUT / "03b-parts.png", full_page=True)
         v = page.inner_text(".verdict")
         check(("解けた" in v and "なかった" not in v) if want else ("解けなかった" in v), f"{i + 1}問目：自動で「{'解けた' if want else '解けなかった'}」")
         check(page.locator(".rate").count() == 0, f"{i + 1}問目：○△×のボタンがない")
@@ -156,14 +182,17 @@ with sync_playwright() as pw:
         page.wait_for_function(f"() => document.querySelector('#title').textContent.includes('{nxt}') || document.body.textContent.includes('おつかれさまでした')")
     page.wait_for_selector("text=おつかれさまでした")
     stat = page.eval_on_selector_all(".stat b", "els => els.map(e => e.textContent)")
-    check(stat[:2] == ["4", "2"], f"まとめ：解けた4・解けなかった2 {stat}")
+    check(stat[:2] == ["4", "3"], f"まとめ：解けた4・解けなかった3 {stat}")
+    rec = page.evaluate("async () => (await import('./js/data.js')).state.attempts.find(a => a.problem_id === '20261023-math-02')")
+    check(rec and rec["solved"] is False and rec["chosen"] is None and len(rec["parts"]) == 3 and rec["parts"][1:] == [1, 2],
+          f"小問つきの記録：solved=false、parts に小問ごとの答え {rec and rec.get('parts')}")
 
     due = page.evaluate("""async () => {
       const s = await import('./js/srs.js'); const d = await import('./js/data.js');
       const st = s.buildStates(d.state.attempts, d.state.byId);
       return Object.values(st).map(v => v.interval).sort((a, b) => a - b);
     }""")
-    check(due == [1, 1, 7, 7, 7, 7], f"解けなかった→翌日、解けた→7日 {due}")
+    check(due == [1, 1, 1, 7, 7, 7, 7], f"解けなかった→翌日、解けた→7日 {due}")
 
     r = page.evaluate("""async () => {
       const s = await import('./js/srs.js'); let st; const out = [];
@@ -184,7 +213,7 @@ with sync_playwright() as pw:
     page.click(".tabs button[data-go=list]")
     page.wait_for_selector(".item .pill")
     pills = page.eval_on_selector_all(".item .pill", "els => els.map(e => e.textContent)")
-    check(sorted(pills) == sorted(["学習中"] * 6), f"一覧に状態が出る {pills}")
+    check(sorted(pills) == sorted(["学習中"] * 7), f"一覧に状態が出る {pills}")
     page.click(".chips >> nth=0 >> text=★")
     page.wait_for_selector(".item")
     check(page.locator(".item").count() == 1, "★の一覧にブックマークした1問")
@@ -245,13 +274,8 @@ with sync_playwright() as pw:
     pg.click("#start")
     for want in [False, True]:
         pg.wait_for_selector(".choice:not([disabled])")
-        topic = pg.inner_text(".meta .topic")
-        pid = next(p["id"] for p in probs if p["topic"] == topic)
-        ans = next(p["answer"] for p in probs if p["id"] == pid)
-        if want:
-            pg.click(f".choice[data-idx='{ans}']")
-        else:
-            pg.locator(f".choice:not([data-idx='{ans}'])").first.click()
+        pid = pg.get_attribute(".card[data-pid]", "data-pid")
+        solve(pg, next(p for p in probs if p["id"] == pid), want)
         pg.wait_for_selector(".verdict")
         if not want:
             pg.click(".meta .star")

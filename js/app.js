@@ -5,7 +5,7 @@ import * as tracker from "./tracker.js";
 import { buildStates, todayQueue, ymd, daysBetween, EXAMS } from "./srs.js";
 import { rich, inline, escapeHTML as esc } from "./render.js";
 
-export const VERSION = "0.4.0";
+export const VERSION = "0.5.0";
 const SUBJECTS = ["数学", "物理", "英語", "電験"];
 const LAB = "ABCDE";
 const STATUS = {
@@ -315,18 +315,29 @@ async function showPhotos(btn, box, paths) {
   } catch (e) { toast(errText(e)); }
 }
 
+// 小問の一覧。小問のない問題は、問題そのものを1つの小問として扱う
+function partsOf(p) {
+  if (p.parts?.length) return p.parts;
+  return [{ label: "", question: "", choices: p.choices, answer: p.answer, my_answer: p.my_answer, explanation: p.explanation, mistake: p.mistake }];
+}
+
+function misHTML(m) {
+  return `<div class="mis"><div><b>${esc(m.type || "")} 前回の間違い</b>　${inline(m.what || "")}</div><div><b>防ぐには</b>　${inline(m.prevent || "")}</div></div>`;
+}
+
 async function card(p, { onNext, progress, nextLabel = "次へ" }) {
   view.innerHTML = "";
   const box = document.createElement("div");
   const inquiry = kindOf(p) === "inquiry";
+  const ps = partsOf(p);
+  const multi = !!p.parts?.length;
   box.innerHTML = `
     ${progress != null ? `<div class="progress"><i style="width:${progress}%"></i></div>` : ""}
-    <div class="card c-${p.subject}">
-      <div class="meta">${inquiry ? '<span class="badge">調べもの</span>' : ""}<b>${p.subject}</b><span>${p.week}</span><span>${esc(srcText(p))}</span><span class="topic">${esc(p.topic)}</span>${statusPill(p.id)}${star("problem", p.id)}</div>
+    <div class="card c-${p.subject}" data-pid="${esc(p.id)}">
+      <div class="meta">${inquiry ? '<span class="badge">調べもの</span>' : ""}<b>${p.subject}</b><span>${p.week}</span><span>${esc(srcText(p))}</span><span class="topic">${esc(p.topic)}</span>${multi ? `<span>小問${ps.length}</span>` : ""}${statusPill(p.id)}${star("problem", p.id)}</div>
       <div class="q">${rich(p.question)}</div>
       <div id="figs"></div>
-      <div class="choices" id="choices"></div>
-      <p style="text-align:center;margin:10px 0 0"><button class="chip" id="reveal">わからない（答えを見る）</button></p>
+      <div id="parts"></div>
       <div id="answer"></div>
     </div>`;
   view.append(box);
@@ -336,47 +347,84 @@ async function card(p, { onNext, progress, nextLabel = "次へ" }) {
 
   // 電験は本番と同じく (1)〜(5) の元の順。ほかの科目は毎回並べ替える
   const denken = p.subject === "電験";
-  const order = denken ? [...p.choices.keys()] : shuffle(p.choices.length);
-  const wrap = $("#choices", box);
-  order.forEach((idx, pos) => {
-    const b = document.createElement("button");
-    b.className = "choice";
-    b.dataset.idx = idx;
-    b.innerHTML = `<span class="lab">${denken ? `(${pos + 1})` : LAB[pos]}</span>${inline(p.choices[idx])}`;
-    b.onclick = () => answer(idx);
-    wrap.append(b);
-  });
-  $("#reveal", box).onclick = () => answer(null);
+  const chosen = [];
 
-  // 選んだ時点で自動で「解けた／解けなかった」を記録する
-  async function answer(chosen) {
-    tracker.touch();
-    const solved = chosen === p.answer;
-    wrap.querySelectorAll(".choice").forEach((b) => {
-      const i = Number(b.dataset.idx);
-      b.disabled = true;
-      if (i === p.answer) b.classList.add("ok");
-      if (i === chosen && !solved) b.classList.add("ng");
-      if (i === p.my_answer && i !== p.answer) b.classList.add("mine");
+  async function showPart(k) {
+    const x = ps[k];
+    const el = document.createElement("div");
+    el.className = multi ? "part" : "";
+    el.dataset.part = k;
+    el.innerHTML = `
+      ${multi ? `<div class="ptitle"><b class="plab">${esc(x.label)}</b><small>${k + 1} / ${ps.length}</small></div><div class="q">${rich(x.question)}</div><div class="pfigs"></div>` : ""}
+      <div class="choices"></div>
+      <p class="revealp" style="text-align:center;margin:10px 0 0"><button class="chip reveal">わからない（答えを見る）</button></p>
+      <div class="pres"></div>`;
+    $("#parts", box).append(el);
+    if (multi && x.figures?.length) $(".pfigs", el).innerHTML = await figuresHTML(x);
+    const wrap = $(".choices", el);
+    const order = denken ? [...x.choices.keys()] : shuffle(x.choices.length);
+    order.forEach((idx, pos) => {
+      const b = document.createElement("button");
+      b.className = "choice";
+      b.dataset.idx = idx;
+      b.innerHTML = `<span class="lab">${denken ? `(${pos + 1})` : LAB[pos]}</span>${inline(x.choices[idx])}`;
+      b.onclick = () => pick(idx);
+      wrap.append(b);
     });
-    $("#reveal", box).parentElement.remove();
-    await data.recordAttempt(p.id, solved, chosen);
+    $(".reveal", el).onclick = () => pick(null);
+    if (k > 0) el.scrollIntoView({ behavior: "smooth", block: "start" });
+
+    async function pick(c) {
+      tracker.touch();
+      const ok = c === x.answer;
+      wrap.querySelectorAll(".choice").forEach((b) => {
+        const i = Number(b.dataset.idx);
+        b.disabled = true;
+        if (i === x.answer) b.classList.add("ok");
+        if (i === c && !ok) b.classList.add("ng");
+        if (i === x.my_answer && i !== x.answer) b.classList.add("mine");
+      });
+      $(".revealp", el).remove();
+      chosen.push(c);
+      if (!multi) return finish();
+      // 小問ごとに正誤と解説。間違えても正しい値を見てから次の小問へ進む
+      const last = k + 1 >= ps.length;
+      const r = $(".pres", el);
+      r.innerHTML = `
+        <div class="pverdict ${ok ? "ok" : "ng"}">${esc(x.label)} ${ok ? "正解" : "不正解"}</div>
+        <div class="exp"><h4>解説</h4>${rich(x.explanation)}</div>
+        ${!inquiry && x.mistake ? misHTML(x.mistake) : ""}
+        ${last ? "" : `<div class="next"><button class="btn ghost pnext">次の小問 ${esc(ps[k + 1].label)} へ</button></div>`}`;
+      if (last) return finish();
+      $(".pnext", r).onclick = (ev) => { ev.target.closest(".next").remove(); showPart(k + 1); };
+      r.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+
+  // 全小問を答えたら「解けた（全小問正解）／解けなかった」を記録する
+  async function finish() {
+    const results = ps.map((x, i) => chosen[i] === x.answer);
+    const solved = results.every(Boolean);
+    await data.recordAttempt(p.id, solved, multi ? null : chosen[0], multi ? chosen : null);
     recompute();
     schedulePush();
     const st = states[p.id];
-    const m = p.mistake || {};
     const note = inquiry ? data.state.notesById[p.note] : null;
+    const body = multi
+      ? `<div class="presum">${ps.map((x, i) => `<span class="${results[i] ? "ok" : "ng"}">${esc(x.label)} ${results[i] ? "○" : "×"}</span>`).join("")}</div>
+         ${p.explanation ? `<div class="exp"><h4>全体の補足</h4>${rich(p.explanation)}</div>` : ""}`
+      : `<div class="exp"><h4>解説</h4>${rich(ps[0].explanation)}</div>${inquiry ? "" : misHTML(ps[0].mistake || {})}`;
     const tail = inquiry
       ? `<div class="pt"><div><b>覚えておくこと</b>　${inline(p.point || "")}</div></div>
          <div class="photo"><button class="chip" id="noteBtn">元の疑問と解説を読む${note ? `：${esc(note.title)}` : ""}</button><div id="noteBox" class="notebox" hidden></div></div>`
-      : `<div class="mis"><div><b>${esc(m.type || "")} 前回の間違い</b>　${inline(m.what || "")}</div><div><b>防ぐには</b>　${inline(m.prevent || "")}</div></div>`;
+      : "";
     const nextDays = st ? daysBetween(ymd(), st.due) : 0;
     const a = $("#answer", box);
     a.className = "answer";
     a.innerHTML = `
       <div class="verdict ${solved ? "ok" : "ng"}">${solved ? "解けた" : "解けなかった"}
-        <small>${st?.status === "teichaku" ? "定着（2回続けて解けた）　" : st?.status === "caution" ? "要注意（2回続けて解けなかった）　" : ""}次は${nextDays <= 1 ? "明日" : `${nextDays}日後`}</small></div>
-      <div class="exp"><h4>解説</h4>${rich(p.explanation)}</div>
+        <small>${multi ? "全小問正解で「解けた」　" : ""}${st?.status === "teichaku" ? "定着（2回続けて解けた）　" : st?.status === "caution" ? "要注意（2回続けて解けなかった）　" : ""}次は${nextDays <= 1 ? "明日" : `${nextDays}日後`}</small></div>
+      ${body}
       ${tail}
       ${p.originals?.length && data.canGitHub() ? '<div class="photo"><button class="chip" id="photo">元の写真を見る</button><div id="photos"></div></div>' : ""}
       <div class="next"><button class="btn" id="next">${nextLabel}</button></div>`;
@@ -393,6 +441,8 @@ async function card(p, { onNext, progress, nextLabel = "次へ" }) {
     $("#next", a).onclick = () => onNext(solved);
     a.scrollIntoView({ behavior: "smooth", block: "start" });
   }
+
+  showPart(0);
 }
 
 function review() {
@@ -481,7 +531,7 @@ function list() {
       const it = document.createElement("div");
       it.className = `item c-${p.subject}`;
       it.innerHTML = `${statusPill(p.id)}
-        <span class="t"><b>${kindOf(p) === "inquiry" ? '<span class="badge">調</span>' : ""}${esc(p.topic)}</b><span>${esc(srcText(p))}　${md(p.date)}${st ? `　次回 ${md(st.due)}` : ""}</span></span>${star("problem", p.id)}`;
+        <span class="t"><b>${kindOf(p) === "inquiry" ? '<span class="badge">調</span>' : ""}${esc(p.topic)}${p.parts?.length ? `<small class="np">小問${p.parts.length}</small>` : ""}</b><span>${esc(srcText(p))}　${md(p.date)}${st ? `　次回 ${md(st.due)}` : ""}</span></span>${star("problem", p.id)}`;
       it.onclick = () => go("problem/" + p.id);
       wrap.append(it);
     }

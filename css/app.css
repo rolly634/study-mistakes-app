@@ -154,3 +154,12 @@ input.f, select.f { width: 100%; font: inherit; padding: 10px 12px; border: 1.5p
 .swipe-card.fly-left { transform: translateX(-120%) rotate(-12deg) !important; opacity: 0; }
 .swipe-btns { margin-top: 12px; }
 .swipe-btns .btn { margin: 0; }
+/* 小問 */
+.part { border-top: 1.5px dashed var(--line); margin-top: 14px; padding-top: 10px; }
+.ptitle { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.ptitle .plab { color: var(--accent); font-size: 16px; } .ptitle small { color: var(--sub); }
+.pverdict { font-weight: 800; margin: 10px 0 6px; } .pverdict.ok { color: var(--ok); } .pverdict.ng { color: var(--ng); }
+.presum { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+.presum span { border-radius: 999px; padding: 2px 10px; font-weight: 700; font-size: 14px; }
+.presum .ok { background: var(--ok-bg); color: var(--ok); } .presum .ng { background: var(--ng-bg); color: var(--ng); }
+.np { font-weight: 400; color: var(--sub); font-size: 12px; margin-left: 6px; }

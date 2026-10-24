@@ -11,7 +11,7 @@ export const state = {
   byId: {},
   notes: [],        // 疑問ノート
   notesById: {},
-  attempts: [],     // 解いた記録 {id, problem_id, solved, chosen, at, device}
+  attempts: [],     // 解いた記録 {id, problem_id, solved, chosen, parts, at, device}
   bookmarks: {},    // { "problem:<id>" / "note:<id>": true }
   noteStatus: {},   // { note_id: "teichaku" | "fukushu" }
   waiting: [],      // 写真待ち {mark_id, item_id, label, subject, marked_on}
@@ -109,7 +109,7 @@ async function pullSupa(onStep) {
   await flush(onStep);
   onStep("記録を取得中");
   const [att, bm, nst, wait] = await Promise.all([
-    supa.rest("attempts?select=id,problem_id,solved,chosen,at,device&order=at"),
+    supa.rest("attempts?select=id,problem_id,solved,chosen,parts,at,device&order=at"),
     supa.rest("bookmarks?select=target_type,target_id"),
     supa.rest("note_status?select=note_id,status"),
     supa.rest("photo_waiting?select=mark_id,item_id,label,subject,marked_on&order=marked_on"),
@@ -181,8 +181,9 @@ async function queue(op) {
 }
 
 // ---------- 記録する操作 ----------
-export async function recordAttempt(problemId, solved, chosen) {
-  const row = { id: uuid(), problem_id: problemId, solved, chosen, at: new Date().toISOString(), device: store.deviceId() };
+// 小問つき問題は chosen を null にし、parts に小問ごとの選んだ番号（わからない＝null）を入れる。solved は全小問正解
+export async function recordAttempt(problemId, solved, chosen, parts = null) {
+  const row = { id: uuid(), problem_id: problemId, solved, chosen, parts, at: new Date().toISOString(), device: store.deviceId() };
   state.attempts.push(row);
   await queue({ k: "attempt", row });
   return row;
