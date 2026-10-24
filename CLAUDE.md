@@ -19,7 +19,7 @@ js/data.js     問題・ノート（mistake_content、hash で差分取得）・
 js/github.js   GitHub Contents API（旧方式。ログインしていないときだけ使う）
 js/supa.js     Supabase の最小クライアント（fetch のみ。メール＋パスワードでログイン、REST）
 js/tracker.js  復習時間の自動記録（5分で区切る、1分未満は捨てる）
-js/srs.js      間隔反復（解けなかった 1日、解けた 7→14→28→56日、上限は試験までの残り日数の半分）。定着／要注意の判定。1日の出題数の上限はない
+js/srs.js      間隔反復（解けなかった 1日、解けた 7→14→28→56日、上限は試験までの残り日数の半分）。定着／要注意の判定。1日の出題数の上限はない。今日の並びは 期限の誤答→期限の調べもの→未出題の誤答→未出題の調べもの
 js/render.js   Markdown＋LaTeX → HTML（KaTeX、DOMPurify）
 js/store.js    IndexedDB（データ）と localStorage（設定・端末ID）
 demo/          見本モードのデータ
