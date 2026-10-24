@@ -1,5 +1,5 @@
 // オフライン用：アプリ本体を端末に保存する（問題データは IndexedDB 側で保存）
-const VERSION = "v0.3.0";
+const VERSION = "v0.4.0";
 const CACHE = `app-${VERSION}`;
 const KATEX_FONTS = [
   "AMS-Regular", "Caligraphic-Bold", "Caligraphic-Regular", "Fraktur-Bold", "Fraktur-Regular", "Main-Bold",
@@ -9,7 +9,7 @@ const KATEX_FONTS = [
 ].map((f) => `vendor/katex/fonts/KaTeX_${f}.woff2`);
 const FILES = [
   "./", "index.html", "manifest.webmanifest", "css/app.css",
-  "js/app.js", "js/data.js", "js/github.js", "js/render.js", "js/srs.js", "js/store.js",
+  "js/app.js", "js/data.js", "js/github.js", "js/render.js", "js/srs.js", "js/store.js", "js/supa.js", "js/tracker.js",
   "vendor/katex/katex.min.js", "vendor/katex/katex.min.css", "vendor/marked.umd.js", "vendor/purify.min.js",
   "icons/icon-192.png", "icons/icon-512.png", "icons/maskable-512.png", "icons/apple-touch-icon.png",
   ...KATEX_FONTS,

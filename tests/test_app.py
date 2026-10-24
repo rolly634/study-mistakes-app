@@ -1,16 +1,20 @@
-"""誤答トレーニングの動作テスト（スマホ幅）。
+"""誤答トレーニング v0.4.0 の動作テスト（スマホ幅）。
 
-1. 見本モード：出題 → 選択 → 解説 → ○△× → まとめ → 一覧 → 間隔反復の次回日
-2. GitHub モード：api.github.com をローカルの study-mistakes（見本を problems に見立てる）で代用し、
-   problems.json と図の取得、解答の書き戻し（PUT）、再読み込み後の履歴復元を確認
+1. 見本モード：選んだ答えで自動判定 → 解説 → 次へ、ブックマーク、疑問ノートのスワイプ仕分け、間隔反復
+2. 連携モード：GitHub（問題）と Supabase（記録）を偽のサーバーで代用し、ログイン、写真待ちの確認、
+   解いた記録・ブックマーク・ノートの仕分け・復習時間の送信、端末データを消したあとの復元、オフラインを確認
+
+    python3 tests/test_app.py [スクリーンショットの出力先]
+    （DATA_REPO で study-mistakes の場所を指定。既定は隣のフォルダ）
 """
 import base64
-import os
 import json
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 
 from playwright.sync_api import sync_playwright
 
@@ -19,52 +23,7 @@ DATA = Path(os.environ.get("DATA_REPO", APP.parent / "study-mistakes"))
 OUT = Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/claude-0/shots")
 OUT.mkdir(parents=True, exist_ok=True)
 PORT = 8765
-
-srv = subprocess.Popen([sys.executable, "-m", "http.server", str(PORT), "-d", str(APP)],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-time.sleep(1)
 errors = []
-
-# ---- 偽の GitHub ----
-probs = []
-for f in sorted((DATA / "examples/problems").rglob("*.json")):
-    probs.append(json.loads(f.read_text(encoding="utf-8")))
-notes = [json.loads(f.read_text(encoding="utf-8")) for f in sorted((DATA / "examples/notes").rglob("*.json"))]
-remote = {"index/problems.json": json.dumps({"count": len(probs), "problems": probs, "notes": notes}, ensure_ascii=False)}
-for f in (DATA / "examples/figures").glob("*.svg"):
-    remote[f"examples/figures/{f.name}"] = f.read_text(encoding="utf-8")
-shas = {}
-puts = []
-
-
-def gh(route):
-    req = route.request
-    url = req.url.split("?")[0]
-    base = "https://api.github.com/repos/rolly634/study-mistakes"
-    if req.headers.get("authorization") != "Bearer test-token":
-        return route.fulfill(status=401, json={"message": "Bad credentials"})
-    path = url[len(base):].lstrip("/")
-    if path == "":
-        return route.fulfill(json={"full_name": "rolly634/study-mistakes", "private": True, "permissions": {"push": True}})
-    assert path.startswith("contents/")
-    from urllib.parse import unquote
-    p = unquote(path[len("contents/"):])
-    if req.method == "PUT":
-        body = json.loads(req.post_data)
-        if p in remote and body.get("sha") != shas.get(p):
-            return route.fulfill(status=409, json={"message": "sha mismatch"})
-        remote[p] = base64.b64decode(body["content"]).decode()
-        shas[p] = f"sha{len(puts)}"
-        puts.append(p)
-        return route.fulfill(status=201, json={"content": {"sha": shas[p]}})
-    if p == "reviews":
-        items = [{"name": k.split("/")[-1], "path": k, "sha": shas.get(k, "x")} for k in remote if k.startswith("reviews/")]
-        return route.fulfill(json=items)
-    if p not in remote:
-        return route.fulfill(status=404, json={"message": "Not Found"})
-    if "raw" in req.headers.get("accept", ""):
-        return route.fulfill(body=remote[p])
-    return route.fulfill(json={"sha": shas.get(p, "x"), "content": base64.b64encode(remote[p].encode()).decode()})
 
 
 def check(cond, msg):
@@ -73,155 +32,274 @@ def check(cond, msg):
         errors.append(msg)
 
 
+srv = subprocess.Popen([sys.executable, "-m", "http.server", str(PORT), "-d", str(APP)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+time.sleep(1)
+
+demo = json.loads((APP / "demo/problems.json").read_text(encoding="utf-8"))
+ANSWER = {p["id"]: p["answer"] for p in demo["problems"]}
+
+# ---- 偽の GitHub ----
+probs = [json.loads(f.read_text(encoding="utf-8")) for f in sorted((DATA / "examples/problems").rglob("*.json"))]
+notes = [json.loads(f.read_text(encoding="utf-8")) for f in sorted((DATA / "examples/notes").rglob("*.json"))]
+remote = {"index/problems.json": json.dumps({"count": len(probs), "problems": probs, "notes": notes}, ensure_ascii=False)}
+for f in (DATA / "examples/figures").glob("*.svg"):
+    remote[f"examples/figures/{f.name}"] = f.read_text(encoding="utf-8")
+
+
+def gh(route):
+    req = route.request
+    if req.headers.get("authorization") != "Bearer test-token":
+        return route.fulfill(status=401, json={"message": "Bad credentials"})
+    base = "https://api.github.com/repos/rolly634/study-mistakes"
+    path = req.url.split("?")[0][len(base):].lstrip("/")
+    if path == "":
+        return route.fulfill(json={"full_name": "rolly634/study-mistakes", "private": True, "permissions": {"push": True}})
+    p = unquote(path[len("contents/"):])
+    if p not in remote:
+        return route.fulfill(status=404, json={"message": "Not Found"})
+    return route.fulfill(body=remote[p])
+
+
+# ---- 偽の Supabase ----
+db = {"attempts": [], "sessions": [], "bookmarks": [], "note_status": [], "photo_dismissed": [],
+      "waiting": [{"mark_id": "m-1", "item_id": "GO1-43", "label": "合格るIAIIB 43", "subject": "math", "marked_on": "2026-10-24"}]}
+
+
+def sb(route):
+    req = route.request
+    u = urlparse(req.url)
+    q = parse_qs(u.query)
+    if u.path == "/auth/v1/token":
+        body = json.loads(req.post_data or "{}")
+        if q["grant_type"][0] == "password" and not (body.get("email") == "me@example.com" and body.get("password") == "pw"):
+            return route.fulfill(status=400, json={"error_description": "Invalid login credentials"})
+        return route.fulfill(json={"access_token": "at1", "refresh_token": "rt1", "expires_in": 3600,
+                                   "expires_at": int(time.time()) + 3600, "user": {"id": "u1", "email": "me@example.com"}})
+    if u.path == "/auth/v1/logout":
+        return route.fulfill(status=204, body="")
+    if req.headers.get("authorization") != "Bearer at1":
+        return route.fulfill(status=401, json={"message": "JWT"})
+    table = u.path.split("/")[-1]
+    body = json.loads(req.post_data) if req.post_data else None
+    if table == "photo_waiting":
+        gone = {d["mark_id"] for d in db["photo_dismissed"]}
+        return route.fulfill(json=[w for w in db["waiting"] if w["mark_id"] not in gone])
+    rows = db[table]
+    if req.method == "GET":
+        return route.fulfill(json=rows)
+    if req.method == "POST":
+        for r in body:
+            if table == "note_status":
+                rows[:] = [x for x in rows if x["note_id"] != r["note_id"]]
+            if table in ("attempts", "sessions") and any(x["id"] == r["id"] for x in rows):
+                continue
+            if table == "bookmarks" and any(x["target_type"] == r["target_type"] and x["target_id"] == r["target_id"] for x in rows):
+                continue
+            rows.append(r)
+        return route.fulfill(status=201, body="")
+    if req.method == "DELETE":
+        t = q["target_type"][0].removeprefix("eq.")
+        i = q["target_id"][0].removeprefix("eq.")
+        rows[:] = [x for x in rows if not (x["target_type"] == t and x["target_id"] == i)]
+        return route.fulfill(status=204, body="")
+    return route.fulfill(status=400, json={"message": "?"})
+
+
+def choose(page, correct):
+    pid = page.evaluate("() => location.hash")  # 使わない（出題中の問題 id は meta から取れないので data 属性で判定）
+    ids = page.evaluate("async () => { const d = await import('./js/data.js'); return null; }")
+    return pid, ids
+
+
 with sync_playwright() as pw:
     b = pw.chromium.launch(executable_path="/opt/pw-browsers/chromium", args=["--no-sandbox"])
+
+    # ================= 見本モード =================
     ctx = b.new_context(**pw.devices["Pixel 7"], locale="ja-JP")
     page = ctx.new_page()
     page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
     page.on("console", lambda m: m.type == "error" and errors.append(f"console: {m.text}"))
     page.goto(f"http://localhost:{PORT}/")
     page.wait_for_selector("text=はじめに")
-    page.screenshot(path=OUT / "01-first.png")
-
-    # ---- 見本モード ----
     page.click("text=見本で試す")
     page.wait_for_selector("#start")
-    check("6" in page.inner_text(".hero .big"), "見本6問（誤答4・調べもの2）が今日の復習に入る")
-    page.click(".chips >> nth=0 >> text=調べもの")
-    page.wait_for_function("() => document.querySelector('.hero .big').textContent.startsWith('2')")
-    check(True, "「調べもの」で絞ると2問")
-    page.click(".chips >> nth=0 >> text=すべて")
-    page.wait_for_function("() => document.querySelector('.hero .big').textContent.startsWith('6')")
+    check(page.inner_text(".hero .big").startswith("6"), "見本6問が今日の復習に入る")
     page.screenshot(path=OUT / "02-home.png", full_page=True)
     page.click("#start")
-    rates = ["x", "d", "o", "o", "o", "d"]
-    for i, r in enumerate(rates):
-        page.wait_for_selector(".choice")
+    plan = [False, True, True, False, True, True]  # 解けた／解けなかったの選び方
+    for i, want in enumerate(plan):
+        page.wait_for_selector(".choice:not([disabled])")
+        topic = page.inner_text(".meta .topic")
+        pid = next(p["id"] for p in demo["problems"] if p["topic"] == topic)
+        ans = ANSWER[pid]
         if "電験" in page.inner_text(".meta"):
             labs = page.eval_on_selector_all(".choice .lab", "els => els.map(e => e.textContent)")
-            check(labs == ["(1)", "(2)", "(3)", "(4)", "(5)"], f"電験は (1)〜(5) の5択 {labs}")
-            idxs = page.eval_on_selector_all(".choice", "els => els.map(e => e.dataset.idx)")
-            check(idxs == ["0", "1", "2", "3", "4"], "電験は元の順に並ぶ")
-        if i == 0:
-            check(page.locator(".katex").count() > 0, "数式が KaTeX で描かれる")
-            page.screenshot(path=OUT / "03-question.png", full_page=True)
-        if page.locator(".figs img").count():
-            ok = page.evaluate("() => [...document.querySelectorAll('.figs img')].every(i => i.complete && i.naturalWidth > 0)")
-            check(ok, f"{i + 1}問目の図が表示される")
-        # 間違いの選択肢を選ぶ（1問目）／正解を選ぶ（それ以外）
-        target = ".choice:not([data-idx='0'])" if i == 0 else None
-        if i == 0:
-            page.locator(target).first.click()
+            check(labs == ["(1)", "(2)", "(3)", "(4)", "(5)"], f"電験は (1)〜(5) の5択（{topic}）")
+        if want:
+            page.click(f".choice[data-idx='{ans}']")
         else:
-            idx = page.evaluate("() => { const t = document.querySelector('.meta .topic').textContent; return null; }")
-            page.locator(".choice").first.click()
-        page.wait_for_selector(".rate")
-        if page.locator(".meta .badge").count():
-            check(page.locator(".pt").count() == 1 and page.locator(".mis").count() == 0, f"{i + 1}問目（調べもの）に「覚えておくこと」が出る")
-            page.click("#noteBtn")
-            page.wait_for_selector("#noteBox .asked")
-            check("実効値" in page.inner_text("#noteBox"), "元の疑問と解説が開く")
-            page.screenshot(path=OUT / "04b-inquiry.png", full_page=True)
+            page.locator(f".choice:not([data-idx='{ans}'])").first.click()
+        page.wait_for_selector(".verdict")
+        v = page.inner_text(".verdict")
+        check(("解けた" in v and "なかった" not in v) if want else ("解けなかった" in v), f"{i + 1}問目：自動で「{'解けた' if want else '解けなかった'}」")
+        check(page.locator(".rate").count() == 0, f"{i + 1}問目：○△×のボタンがない")
         if i == 0:
-            check(page.locator(".choice.ng").count() == 1 and page.locator(".choice.ok").count() == 1, "不正解で赤と緑が付く")
-            check(page.locator(".rate .x.hint").count() == 1, "不正解なら×をすすめる")
-            page.screenshot(path=OUT / "04-answer.png", full_page=True)
-        page.click(f".rate .{r}")
-        nxt = f"{i + 2}/{len(rates)}"
+            page.click(".meta .star")
+            page.wait_for_selector(".meta .star.on")
+            check(True, "出題中にブックマークできる")
+            page.screenshot(path=OUT / "03-answer.png", full_page=True)
+        if page.locator(".meta .badge").count():
+            check(page.locator(".pt").count() == 1, f"{i + 1}問目（調べもの）に「覚えておくこと」")
+        page.click("#next")
+        nxt = f"{i + 2}/{len(plan)}"
         page.wait_for_function(f"() => document.querySelector('#title').textContent.includes('{nxt}') || document.body.textContent.includes('おつかれさまでした')")
     page.wait_for_selector("text=おつかれさまでした")
-    page.screenshot(path=OUT / "05-summary.png", full_page=True)
-    check("6" in page.inner_text(".hero .big"), "まとめに6問")
+    stat = page.eval_on_selector_all(".stat b", "els => els.map(e => e.textContent)")
+    check(stat[:2] == ["4", "2"], f"まとめ：解けた4・解けなかった2 {stat}")
 
-    page.click(".tabs button[data-go=list]")
-    page.wait_for_selector(".item")
-    marks = page.eval_on_selector_all(".item .mark", "els => els.map(e => e.textContent)")
-    check(sorted(marks) == sorted(["×", "△", "○", "○", "○", "△"]), f"一覧に○△×が付く {marks}")
-    page.screenshot(path=OUT / "06-list.png", full_page=True)
-    page.click(".chips >> nth=0 >> text=週別")
-    page.wait_for_selector("h3")
-    page.click(".chips >> nth=0 >> text=疑問ノート")
-    page.wait_for_selector(".item")
-    page.locator(".item").first.click()
-    page.wait_for_selector(".asked")
-    check(page.locator(".list .item").count() == 2, "ノート画面に問題2問が並ぶ")
-    page.screenshot(path=OUT / "06b-note.png", full_page=True)
-    page.click("#back")
-    page.wait_for_selector(".item")
-    page.click(".tabs button[data-go=home]")
-    page.wait_for_selector(".hero")
-    check("0" in page.inner_text(".hero .big"), "今日の分が0問になる")
-
-    # 次回日（間隔反復）
     due = page.evaluate("""async () => {
-      const s = await import('./js/srs.js');
-      const d = await import('./js/data.js');
-      const st = s.buildStates(d.state.events, d.state.byId);
-      return Object.fromEntries(Object.entries(st).map(([k, v]) => [k, [v.last, v.interval, v.due]]));
+      const s = await import('./js/srs.js'); const d = await import('./js/data.js');
+      const st = s.buildStates(d.state.attempts, d.state.byId);
+      return Object.values(st).map(v => v.interval).sort((a, b) => a - b);
     }""")
-    print("    次回:", due)
-    check(sorted(v[1] for v in due.values()) == [1, 3, 3, 7, 7, 7], "×=1日、△=3日、○=7日")
+    check(due == [1, 1, 7, 7, 7, 7], f"解けなかった→翌日、解けた→7日 {due}")
 
-    # 間隔の計算（単体）
     r = page.evaluate("""async () => {
-      const s = await import('./js/srs.js');
-      let st; const out = [];
-      for (const [r, d] of [['o','2026-10-24'],['o','2026-10-31'],['o','2026-11-14'],['o','2026-12-12'],['x','2027-01-20'],['o','2027-01-21'],['o','2027-01-28'],['o','2027-02-11']]) {
-        st = s.apply(st, r, d, '数学'); out.push([d, r, st.interval, st.due]);
+      const s = await import('./js/srs.js'); let st; const out = [];
+      for (const [ok, d] of [[true,'2026-10-24'],[true,'2026-10-31'],[false,'2026-11-14'],[false,'2026-11-15'],[true,'2026-11-16'],[true,'2026-11-23'],[true,'2027-02-11']]) {
+        st = s.apply(st, ok, d, '数学'); out.push([st.interval, st.status, st.due]);
       }
-      const dk = s.apply(undefined, 'o', '2027-03-10', '電験');
-      return {out, cap: s.cap('数学', '2027-02-11'), dk: dk.due};
+      return out;
     }""")
-    for row in r["out"]:
+    for row in r:
         print("    ", row)
-    check([x[2] for x in r["out"]] == [7, 14, 28, 56, 1, 7, 14, 28], "○が続くと間隔が2倍、×で1日に戻る")
-    check(r["out"][-1][3] == "2027-02-21", "試験前は残り日数の半分が上限（2/11は残り21日→上限10日→2/21）")
-    check(r["dk"] == "2027-03-15", "電験は3/21を基準に上限（3/10→3/15）")
+    check([x[0] for x in r] == [7, 14, 1, 1, 7, 14, 28], "間隔：7→14、解けないと1日、また7→14→28")
+    check([x[1] for x in r] == ["learning", "teichaku", "learning", "caution", "learning", "teichaku", "teichaku"], "状態：2回続けて解けた＝定着、2回続けて解けない＝要注意")
+    check(r[-1][2] == "2027-02-21", "試験前は残り日数の半分が上限（2/11→2/21）")
 
-    # ---- GitHub モード ----
+    page.click("#home")
+    page.wait_for_selector("#bm")
+    check("（1）" in page.inner_text("#bm"), "ホームのブックマークが1問")
+    page.click(".tabs button[data-go=list]")
+    page.wait_for_selector(".item .pill")
+    pills = page.eval_on_selector_all(".item .pill", "els => els.map(e => e.textContent)")
+    check(sorted(pills) == sorted(["学習中"] * 6), f"一覧に状態が出る {pills}")
+    page.click(".chips >> nth=0 >> text=★")
+    page.wait_for_selector(".item")
+    check(page.locator(".item").count() == 1, "★の一覧にブックマークした1問")
+    page.screenshot(path=OUT / "04-list.png", full_page=True)
+
+    # 疑問ノートの仕分け（スワイプ）
+    page.click(".chips >> nth=0 >> text=疑問ノート")
+    page.wait_for_selector("#sortBtn")
+    page.click("#sortBtn")
+    page.wait_for_selector("#sw .asked")
+    page.screenshot(path=OUT / "05-swipe.png", full_page=True)
+    box = page.locator("#sw").bounding_box()
+    x, y = box["x"] + box["width"] / 2, box["y"] + 120
+    page.mouse.move(x, y)
+    page.mouse.down()
+    for k in range(1, 11):
+        page.mouse.move(x + k * 18, y + 2)
+    page.mouse.up()
+    page.wait_for_selector("text=仕分けが終わりました")
+    check("1" in page.eval_on_selector_all(".stat b", "els => els.map(e => e.textContent)")[0], "右スワイプで「定着」")
+    st = page.evaluate("async () => (await import('./js/data.js')).state.noteStatus")
+    check(list(st.values()) == ["teichaku"], f"ノートの状態が定着 {st}")
+    ctx.close()
+
+    # ================= 連携モード（GitHub＋Supabase） =================
     ctx2 = b.new_context(**pw.devices["Pixel 7"], locale="ja-JP")
     ctx2.route("https://api.github.com/**", gh)
+    ctx2.route("https://yxqsdfskxwjimgypdudk.supabase.co/**", sb)
     pg = ctx2.new_page()
     pg.on("pageerror", lambda e: errors.append(f"pageerror2: {e}"))
+    pg.on("console", lambda m: m.type in ("error", "warning") and print("    console:", m.text[:200]))
+    pg.on("dialog", lambda d: d.accept())
     pg.goto(f"http://localhost:{PORT}/#settings")
     pg.wait_for_selector("#token")
-    pg.fill("#token", "wrong")
-    pg.click("#save")
-    pg.wait_for_selector("#toast:not([hidden])")
-    check("トークンが無効" in pg.inner_text("#toast"), "間違ったトークンでエラー表示")
     pg.fill("#token", "test-token")
     pg.click("#save")
     pg.wait_for_function("() => document.querySelector('#toast').textContent.includes('接続しました')")
-    pg.screenshot(path=OUT / "07-settings.png", full_page=True)
+    pg.fill("#email", "me@example.com")
+    pg.fill("#pw", "wrong")
+    pg.click("#login")
+    pg.wait_for_function("() => document.querySelector('#toast').textContent.includes('違います')")
+    check(True, "パスワード違いでエラー表示")
+    pg.fill("#pw", "pw")
+    pg.click("#login")
+    pg.wait_for_selector("#logout")
+    check("me@example.com" in pg.inner_text("#view"), "ログインできる")
+    pg.screenshot(path=OUT / "06-settings.png", full_page=True)
+
     pg.click(".tabs button[data-go=home]")
-    pg.wait_for_selector("#start")
-    check("6" in pg.inner_text(".hero .big"), "GitHub から6問を読み込む")
+    pg.wait_for_selector(".waiting")
+    check("写真待ち 1件" in pg.inner_text(".waiting"), "ホームに写真待ち1件")
+    pg.screenshot(path=OUT / "07-waiting.png", full_page=True)
+    pg.click("[data-dismiss]")
+    pg.wait_for_function("() => !document.querySelector('.waiting')")
+    pg.wait_for_timeout(2000)
+    check(db["photo_dismissed"] == [{"mark_id": "m-1"}], f"「確認した」が送られる {db['photo_dismissed']}")
+
     pg.click("#start")
-    for r in ["x", "o"]:
-        pg.wait_for_selector(".choice")
-        pg.locator(".choice").first.click()
-        pg.click(f".rate .{r}")
-    pg.wait_for_timeout(2500)  # 送信を待つ
-    check(any(p.startswith("reviews/") for p in puts), f"解答が reviews/ に書き込まれる {puts}")
-    rv = [k for k in remote if k.startswith("reviews/")]
-    if rv:
-        ev = json.loads(remote[rv[0]])["events"]
-        check(len(ev) == 2 and {e["r"] for e in ev} == {"x", "o"}, "書き込まれた履歴が2件（×と○）")
-        print("    ", rv[0], ev[0])
+    for want in [False, True]:
+        pg.wait_for_selector(".choice:not([disabled])")
+        topic = pg.inner_text(".meta .topic")
+        pid = next(p["id"] for p in probs if p["topic"] == topic)
+        ans = next(p["answer"] for p in probs if p["id"] == pid)
+        if want:
+            pg.click(f".choice[data-idx='{ans}']")
+        else:
+            pg.locator(f".choice:not([data-idx='{ans}'])").first.click()
+        pg.wait_for_selector(".verdict")
+        if not want:
+            pg.click(".meta .star")
+        pg.click("#next")
+        pg.wait_for_timeout(300)
+    pg.wait_for_timeout(2000)
+    check(len(db["attempts"]) == 2 and [a["solved"] for a in db["attempts"]] == [False, True], f"解いた記録が2件送られる {[a.get('solved') for a in db['attempts']]}")
+    check(len(db["bookmarks"]) == 1 and db["bookmarks"][0]["target_type"] == "problem", f"ブックマークが送られる {db['bookmarks']}")
 
-    # 端末のデータを消しても GitHub から戻る
-    pg.evaluate("() => new Promise(r => { const q = indexedDB.deleteDatabase('study-mistakes'); q.onsuccess = q.onerror = q.onblocked = () => r(); })")
+    # 復習時間（6分前から活動していたことにして、ホームに戻る）
+    pg.evaluate("""async () => {
+      const t = await import('./js/tracker.js');
+      t.stop();
+      t.touch(Date.now() - 6 * 60000); t.touch(Date.now() - 4 * 60000); t.touch(Date.now() - 1 * 60000);
+    }""")
+    pg.click("#back")
+    pg.wait_for_timeout(2500)
+    ss = db["sessions"]
+    check(len(ss) >= 1 and ss[-1]["subject"] == "review" and ss[-1]["source"] == "mistakes", f"復習時間が sessions に送られる {ss[-1] if ss else None}")
+    if ss:
+        from datetime import datetime
+        dur = (datetime.fromisoformat(ss[-1]["ended_at"].replace("Z", "+00:00")) - datetime.fromisoformat(ss[-1]["started_at"].replace("Z", "+00:00"))).total_seconds() / 60
+        check(5.5 <= dur <= 7, f"復習時間の長さ（約6分）：{dur:.1f}分")
+
+    # 疑問ノートの仕分けをボタンで（左＝復習中）
     pg.goto(f"http://localhost:{PORT}/#list")
-    pg.wait_for_selector(".item .mark")
-    pg.wait_for_function("() => [...document.querySelectorAll('.item .mark')].filter(e => e.textContent !== '新').length >= 2", timeout=8000)
-    marks = pg.eval_on_selector_all(".item .mark", "els => els.map(e => e.textContent)")
-    check(marks.count("新") == 4, f"履歴を GitHub から復元 {marks}")
+    pg.wait_for_selector(".chips")
+    pg.click(".chips >> nth=0 >> text=疑問ノート")
+    pg.click("#sortBtn")
+    pg.wait_for_selector("#keep")
+    pg.click("#keep")
+    pg.wait_for_selector("text=仕分けが終わりました")
+    pg.wait_for_timeout(2000)
+    check(db["note_status"] and db["note_status"][0]["status"] == "fukushu", f"ノートの仕分けが送られる {db['note_status']}")
 
-    # オフラインでも開ける
-    pg.wait_for_timeout(500)
+    # 端末のデータを消しても戻る
+    pg.evaluate("() => new Promise(r => { const q = indexedDB.deleteDatabase('study-mistakes'); q.onsuccess = q.onerror = q.onblocked = () => r(); })")
+    pg.goto(f"http://localhost:{PORT}/?fresh=1#list")
+    try:
+        pg.wait_for_function("() => [...document.querySelectorAll('.item .pill')].filter(e => e.textContent !== '新').length >= 2", timeout=8000)
+    except Exception:
+        print("    DEBUG", pg.evaluate("""async () => { const d = await import('./js/data.js'); return {p: d.state.problems.length, a: d.state.attempts.length, ops: d.state.ops.length, hash: location.hash, pills: [...document.querySelectorAll('.item .pill')].map(e => e.textContent), sync: document.querySelector('#sync').textContent}; }"""))
+        raise
+    check(pg.locator(".star.on").count() == 1, "ブックマークも戻る")
+    check(True, "記録を Supabase から復元")
+
     ctx2.set_offline(True)
     pg.reload()
-    pg.wait_for_selector(".tabs")
     pg.wait_for_selector(".item, .hero", timeout=8000)
     check(True, "オフラインで再読み込みできる")
     ctx2.set_offline(False)

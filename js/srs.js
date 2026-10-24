@@ -1,6 +1,8 @@
-// 間隔反復：○△× の履歴から次の出題日を決める
-//   × → 翌日   △ → 3日後   ○ → 7日 → 14日 → 28日 → 56日（○が続くたびに2倍）
+// 間隔反復：「解けた／解けなかった」の履歴から次の出題日を決める
+//   解けなかった → 翌日
+//   解けた       → 7日 → 14日 → 28日 → 56日（続けて解けるたびに2倍）
 //   ただし、試験までに必ずもう一度出るよう、間隔は「試験までの残り日数の半分」を上限にする
+// 状態：定着＝2回続けて解けた、要注意＝2回続けて解けなかった
 
 export const EXAMS = { 入試: "2027-03-04", 電験: "2027-03-21" };
 
@@ -35,48 +37,47 @@ export function cap(subject, today) {
   return Math.max(1, Math.floor(left / 2));
 }
 
-// 1回の評価を状態に反映
-export function apply(state, rating, day, subject) {
-  const s = state ? { ...state } : { interval: 0, streak: 0, reps: 0, lapses: 0 };
+// 1回の結果を状態に反映
+export function apply(state, solved, day, subject) {
+  const s = state ? { ...state } : { interval: 0, streak: 0, misses: 0, reps: 0 };
   let interval;
-  if (rating === "x") {
-    interval = 1;
-    s.lapses += 1;
-    s.streak = 0;
-  } else if (rating === "d") {
-    interval = 3;
-    s.streak = 0;
-  } else {
+  if (solved) {
     interval = s.streak > 0 ? s.interval * 2 : 7;
     s.streak += 1;
+    s.misses = 0;
+  } else {
+    interval = 1;
+    s.streak = 0;
+    s.misses += 1;
   }
   s.reps += 1;
   s.interval = interval;
-  s.last = rating;
+  s.last = solved;
   s.lastDay = day;
   s.due = addDays(day, Math.min(interval, cap(subject, day)));
+  s.status = s.streak >= 2 ? "teichaku" : s.misses >= 2 ? "caution" : "learning";
   return s;
 }
 
-// 全履歴から各問題の状態を作る（時刻順に再生）
-export function buildStates(events, problemsById) {
+// 全記録から各問題の状態を作る（時刻順に再生）
+export function buildStates(attempts, problemsById) {
   const states = {};
-  const sorted = [...events].sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
-  for (const e of sorted) {
-    const p = problemsById[e.id];
+  const sorted = [...attempts].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+  for (const a of sorted) {
+    const p = problemsById[a.problem_id];
     if (!p) continue;
-    states[e.id] = apply(states[e.id], e.r, ymd(new Date(e.t)), p.subject);
+    states[a.problem_id] = apply(states[a.problem_id], a.solved, ymd(new Date(a.at)), p.subject);
   }
   return states;
 }
 
 // 今日の出題リスト：期限切れ（古い順）→ 未出題（登録の古い順）
-export function todayQueue(problems, states, { today = ymd(), subject = null, limit = 20, doneToday = 0 } = {}) {
-  const pool = problems.filter((p) => !subject || p.subject === subject);
-  const due = pool
+export function todayQueue(problems, states, { today = ymd(), limit = 20, doneToday = 0 } = {}) {
+  const due = problems
     .filter((p) => states[p.id] && states[p.id].due <= today && states[p.id].lastDay !== today)
     .sort((a, b) => (states[a.id].due < states[b.id].due ? -1 : 1));
-  const fresh = pool.filter((p) => !states[p.id]).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id < b.id ? -1 : 1));
+  const fresh = problems.filter((p) => !states[p.id])
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id < b.id ? -1 : 1));
   const room = Math.max(0, limit - doneToday);
   return [...due, ...fresh].slice(0, room);
 }
