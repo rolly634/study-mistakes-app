@@ -5,7 +5,7 @@ import * as tracker from "./tracker.js";
 import { buildStates, todayQueue, ymd, daysBetween, EXAMS } from "./srs.js";
 import { rich, inline, escapeHTML as esc } from "./render.js";
 
-export const VERSION = "0.9.0";
+export const VERSION = "0.10.0";
 const SUBJECTS = ["数学", "物理", "英語", "電験"];
 const LAB = "ABCDE";
 const STATUS = {
@@ -277,16 +277,27 @@ function schedulePush() {
 }
 
 async function sync({ quiet = false } = {}) {
+  let changed = false;
   try {
     setSync("同期中…");
     const r = await data.pull((s) => setSync(s));
-    recompute();
+    changed = r.changed;
+    if (changed) recompute();
     if (!quiet) toast(`${r.problems}問を読み込みました`);
   } catch (e) {
     if (!quiet) toast(errText(e), 4000);
     console.warn(e);
   }
   setSync(syncLabel());
+  return changed;
+}
+
+// 自動の同期（開いたとき・アプリに戻ってきたとき）。10分以内に同期していれば、未送信の記録を送るだけにする。
+// 変化があったときだけ、出題中・仕分け中・問題やノートの画面でなければ描き直す
+async function autoSync() {
+  if (data.syncedRecently()) { schedulePush(); return; }
+  const changed = await sync({ quiet: true });
+  if (changed && !ui.session && !ui.deck && !/^#(problem|note|inbox)\//.test(location.hash) && location.hash !== "#settings") route();
 }
 
 function errText(e) {
@@ -994,10 +1005,13 @@ async function init() {
   recompute();
   route();
   const s = store.settings();
-  if (s.demo || data.canGitHub() || supa.user()) {
-    await sync({ quiet: true });
-    if (!ui.session && !ui.deck && !/^#(problem|note)\//.test(location.hash)) route();
-  }
+  if (s.demo || data.canGitHub() || supa.user()) await autoSync();
 }
+
+// しばらく別のアプリにいて戻ってきたときも、10分たっていれば同期する
+document.addEventListener("visibilitychange", () => {
+  const s = store.settings();
+  if (document.visibilityState === "visible" && (s.demo || data.canGitHub() || supa.user())) autoSync();
+});
 
 init();

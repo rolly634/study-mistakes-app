@@ -15,7 +15,7 @@
 index.html, manifest.webmanifest, sw.js   PWA 本体（sw.js がアプリ本体をキャッシュ）
 css/app.css                               スマホ幅前提、ダークモード対応
 js/app.js      画面（ホーム・出題・一覧・疑問ノート・仕分け・送ったもの・設定）と遷移（#home, #list, #settings, #review, #sort, #inbox, #problem/<id>, #note/<id>）。Claude に送る欄（⋯で 未分類／修正依頼／質問／メモ）、インストールボタン
-js/data.js     問題・ノート（mistake_content、hash で差分取得）・図と写真（storage の mistakes バケット）と、記録・ブックマーク・ノートの仕分け・写真待ち・受信箱の取得と送信。すべて Supabase。送信は ops に積んで順に送る
+js/data.js     問題・ノート（mistake_content、hash で差分取得）・解いた記録（created_at で差分取得、1日1回は全件。1000行ずつ分けて取る）・図と写真（storage の mistakes バケット）と、記録・ブックマーク・ノートの仕分け・写真待ち・受信箱の取得と送信。すべて Supabase。送信は ops に積んで順に送る
 js/github.js   GitHub Contents API（旧方式。ログインしていないときだけ使う）
 js/supa.js     Supabase の最小クライアント（fetch のみ。メール＋パスワードでログイン、REST）
 js/tracker.js  復習時間の自動記録（5分で区切る、1分未満は捨てる）
@@ -34,6 +34,7 @@ tests/         Playwright の動作テスト
   - 書く：`attempts`（problem_id, solved, chosen, parts, at, device。id は端末で作る uuid）、`inbox`（Claude に送る。id, kind, body, target_type, target_id, part, sent_at。未対応のものは取り消し＝DELETE できる）、`sessions`（subject=review, source=mistakes, id=`mistakes-<uuid>`）、`bookmarks`、`note_status`（teichaku／fukushu）、`photo_dismissed`（mark_id）
   - 読む：上の表（inbox は status・reply も）と、ビュー `photo_waiting`
 - 問題の `kind` が `inquiry` なら調べもの（`point` と `note` を表示に使う）。省略時は誤答
+- 自動の同期（開いたとき・アプリに戻ったとき）は、前回から10分以内なら省いて未送信分を送るだけ。変化がなければ画面を描き直さない
 - 状態（次回日・定着・要注意）は保存せず、毎回 attempts を時刻順に再生して計算する（DB 側のビュー `problem_status` と同じ規則）
 
 ## 変更したら

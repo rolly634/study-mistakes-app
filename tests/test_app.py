@@ -1,4 +1,4 @@
-"""誤答トレーニング v0.9.0 の動作テスト（スマホ幅）。
+"""誤答トレーニング v0.10.0 の動作テスト（スマホ幅）。
 
 1. 見本モード：選んだ答えで自動判定 → 解説 → 次へ、小問つき問題（小問ごとに解説→次の小問、全問正解で解けた）、
    ブックマーク、疑問ノートのスワイプ仕分け、間隔反復
@@ -90,6 +90,8 @@ import hashlib
 content = [{"id": x["id"], "kind": k, "data": x, "hash": hashlib.sha1(json.dumps(x, sort_keys=True).encode()).hexdigest()[:16]}
            for k, xs in (("problem", probs), ("note", notes)) for x in xs]
 content_gets = []
+att_gets = []
+clock = [0]
 db = {"attempts": [], "sessions": [], "bookmarks": [], "note_status": [], "photo_dismissed": [], "inbox": [],
       "waiting": [{"mark_id": "m-1", "item_id": "GO1-43", "label": "合格るIAIIB 43", "subject": "math", "marked_on": "2026-10-24"}]}
 
@@ -121,14 +123,25 @@ def sb(route):
             rows = [r for r in rows if r["id"] in ids]
             content_gets.append(len(rows))
             return route.fulfill(json=rows)
-        return route.fulfill(json=[{"id": r["id"], "kind": r["kind"], "hash": r["hash"]} for r in rows])
+        off, lim = int(q.get("offset", ["0"])[0]), int(q.get("limit", ["100000"])[0])
+        return route.fulfill(json=[{"id": r["id"], "kind": r["kind"], "hash": r["hash"]} for r in rows][off:off + lim])
     body = json.loads(req.post_data) if req.post_data else None
     if table == "photo_waiting":
         gone = {d["mark_id"] for d in db["photo_dismissed"]}
         return route.fulfill(json=[w for w in db["waiting"] if w["mark_id"] not in gone])
     rows = db[table]
     if req.method == "GET":
-        return route.fulfill(json=rows)
+        out = rows
+        if "created_at" in q:
+            c = q["created_at"][0].removeprefix("gt.")
+            out = [r for r in out if r.get("created_at", "") > c]
+        if table == "attempts":
+            out = sorted(out, key=lambda r: (r.get("created_at", ""), r["id"]))
+        off, lim = int(q.get("offset", ["0"])[0]), int(q.get("limit", ["100000"])[0])
+        out = out[off:off + lim]
+        if table == "attempts":
+            att_gets.append(len(out))
+        return route.fulfill(json=out)
     if req.method == "POST":
         for r in body:
             if table == "note_status":
@@ -137,6 +150,9 @@ def sb(route):
                 continue
             if table == "bookmarks" and any(x["target_type"] == r["target_type"] and x["target_id"] == r["target_id"] for x in rows):
                 continue
+            if table == "attempts":
+                clock[0] += 1
+                r = {**r, "created_at": f"2026-10-25T00:00:{clock[0]:06d}+00:00"}
             rows.append(r)
         return route.fulfill(status=201, body="")
     if req.method == "DELETE" and table == "inbox":
@@ -318,6 +334,11 @@ with sync_playwright() as pw:
     first = sum(content_gets)
     pg.evaluate("async () => { const d = await import('./js/data.js'); await d.pull(); }")
     check(sum(content_gets) == first, f"2回目の同期では、変わっていない問題は取り直さない（{first}→{sum(content_gets)}）")
+    n_att = len(att_gets)
+    pg.reload()
+    pg.wait_for_selector("#logout")
+    pg.wait_for_timeout(1200)
+    check(len(att_gets) == n_att, f"同期から10分以内に開き直したときは同期しない（記録の取得 {n_att}→{len(att_gets)}回）")
     pg.screenshot(path=OUT / "06-settings.png", full_page=True)
 
     pg.click(".tabs button[data-go=home]")
@@ -382,6 +403,24 @@ with sync_playwright() as pw:
     pg.wait_for_timeout(2000)
     check(len(db["attempts"]) == 2 and [a["solved"] for a in db["attempts"]] == [False, True], f"解いた記録が2件送られる {[a.get('solved') for a in db['attempts']]}")
     check(len(db["bookmarks"]) == 1 and db["bookmarks"][0]["target_type"] == "problem", f"ブックマークが送られる {db['bookmarks']}")
+    # 解いた記録は差分だけ取る
+    lp = pg.evaluate("async () => { const d = await import('./js/data.js'); await d.pull(); const a = d.lastPull; await d.pull(); return [a, d.lastPull]; }")
+    check(lp[0] == {"full": False, "attempts": 2} and lp[1] == {"full": False, "attempts": 0}, f"解いた記録は差分だけ取る（新しい2件→次は0件） {lp}")
+    db["attempts"].append({"id": "other-device-1", "problem_id": "20261023-math-01", "solved": True, "chosen": 0, "parts": None,
+                           "at": "2026-10-25T01:00:00Z", "device": "x", "created_at": "2026-10-25T00:00:999999+00:00"})
+    lp = pg.evaluate("async () => { const d = await import('./js/data.js'); await d.pull(); return [d.lastPull, d.state.attempts.length]; }")
+    check(lp[0] == {"full": False, "attempts": 1} and lp[1] == 3, f"ほかの端末で増えた1件だけ取り、手元の記録に足す {lp}")
+    # 1日1回の全件取得は 1000 件ずつ分けて取る（1000件を超えても抜けない）
+    for i in range(1500):
+        db["attempts"].append({"id": f"bulk-{i:05d}", "problem_id": "none", "solved": True, "chosen": 0, "parts": None,
+                               "at": "2026-01-01T00:00:00Z", "device": "x", "created_at": f"2026-01-01T00:00:{i:06d}+00:00"})
+    lp = pg.evaluate("""async () => { const s = await import('./js/store.js'); await s.set('attFullAt', 0);
+      const d = await import('./js/data.js'); await d.pull(); return [d.lastPull, d.state.attempts.length]; }""")
+    check(lp[0]["full"] and lp[1] == len(db["attempts"]), f"全件取得は1000件ずつ分けて全部取る（{lp[1]}／{len(db['attempts'])}件）")
+    db["attempts"][:] = [a for a in db["attempts"] if not a["id"].startswith("bulk-")]
+    pg.evaluate("async () => { const s = await import('./js/store.js'); await s.set('attFullAt', 0); const d = await import('./js/data.js'); await d.pull(); }")
+
+
     fromp = [x for x in db["inbox"] if x.get("target_type") == "problem"]
     check(len(fromp) == 1 and fromp[0]["target_id"] == db["attempts"][0]["problem_id"], f"問題の ✉ から送ると問題 id が付く {fromp}")
 
@@ -410,6 +449,21 @@ with sync_playwright() as pw:
     pg.click("#install")
     pg.wait_for_timeout(300)
     check(pg.evaluate("() => window.__prompted") == 1, "インストールボタンでインストールのダイアログが出る")
+
+    # 案3：自動の同期で何も変わらなければ、画面を描き直さない
+    pg.goto(f"http://localhost:{PORT}/#home")
+    pg.wait_for_selector(".hero")
+    same = pg.evaluate("""async () => {
+      const d = await import('./js/data.js');
+      window.__hero = document.querySelector('.hero');
+      d.state.lastSync = new Date(Date.now() - 3600e3).toISOString();
+      const n = d.lastPull;
+      document.dispatchEvent(new Event('visibilitychange'));
+      for (let i = 0; i < 50 && d.lastPull === n; i++) await new Promise(r => setTimeout(r, 100));
+      await new Promise(r => setTimeout(r, 300));
+      return [d.lastPull !== n, document.querySelector('.hero') === window.__hero];
+    }""")
+    check(same == [True, True], f"アプリに戻ったとき10分たっていれば同期し、変化がなければ描き直さない {same}")
 
     # 疑問ノートの仕分けをボタンで（左＝復習中）
     pg.goto(f"http://localhost:{PORT}/#list")

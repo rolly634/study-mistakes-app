@@ -7,6 +7,10 @@ import * as store from "./store.js";
 import * as supa from "./supa.js";
 import { Repo } from "./github.js";
 
+export let lastPull = null; // テスト用：直前の同期で取った解いた記録の件数
+let contentChanged = false;
+let recordsChanged = false;
+
 export const state = {
   problems: [],
   byId: {},
@@ -120,7 +124,7 @@ async function pullProblems(onStep) {
 async function pullContent(onStep) {
   onStep("問題を取得中");
   const local = await store.get("content", {}); // { id: {kind, data, hash} }
-  const list = await supa.rest("mistake_content?select=id,kind,hash&kind=in.(problem,note)");
+  const list = await restAll("mistake_content?select=id,kind,hash&kind=in.(problem,note)&order=id");
   const want = list.filter((x) => local[x.id]?.hash !== x.hash).map((x) => x.id);
   for (let i = 0; i < want.length; i += 40) {
     onStep(`問題を取得中（${Math.min(i + 40, want.length)}/${want.length}）`);
@@ -129,7 +133,9 @@ async function pullContent(onStep) {
     for (const r of rows) local[r.id] = { kind: r.kind, data: r.data, hash: r.hash };
   }
   const keep = new Set(list.map((x) => x.id));
-  for (const id of Object.keys(local)) if (!keep.has(id)) delete local[id];
+  const removed = Object.keys(local).filter((id) => !keep.has(id));
+  for (const id of removed) delete local[id];
+  contentChanged = want.length > 0 || removed.length > 0 || !state.problems.length;
   await store.set("content", local);
   const byDate = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id < b.id ? -1 : 1);
   const vals = Object.values(local);
@@ -150,34 +156,84 @@ async function pullContent(onStep) {
   return problems.length;
 }
 
+// Supabase は1回に最大1000行しか返さないので、order を付けて 1000 行ずつ取る
+export const PAGE = 1000;
+async function restAll(path) {
+  const out = [];
+  for (let off = 0; ; off += PAGE) {
+    const rows = await supa.rest(`${path}${path.includes("?") ? "&" : "?"}limit=${PAGE}&offset=${off}`);
+    out.push(...rows);
+    if (rows.length < PAGE) return out;
+  }
+}
+
+// 解いた記録は差分だけ取る：前回より後にサーバーに入った行（created_at が目印より新しい行）。
+// 1日1回は全件を取り直す（サーバー側で消した行を反映するため）
+const ATT_COLS = "id,problem_id,solved,chosen,parts,at,device,created_at";
+const FULL_EVERY = 24 * 3600 * 1000;
+async function pullAttempts() {
+  const n = ns();
+  const cursor = await store.get(n + "attCursor", null);
+  const fullAt = await store.get(n + "attFullAt", 0);
+  const full = !cursor || Date.now() - fullAt > FULL_EVERY;
+  const rows = full
+    ? await restAll(`attempts?select=${ATT_COLS}&order=created_at,id`)
+    : await restAll(`attempts?select=${ATT_COLS}&created_at=gt.${encodeURIComponent(cursor)}&order=created_at,id`);
+  return { full, rows };
+}
+
 async function pullSupa(onStep) {
   if (!canSupa()) return false;
   await flush(onStep);
   onStep("記録を取得中");
-  const [att, bm, nst, wait, inbox] = await Promise.all([
-    supa.rest("attempts?select=id,problem_id,solved,chosen,parts,at,device&order=at"),
+  const [{ full, rows: att }, bm, nst, wait, inbox] = await Promise.all([
+    pullAttempts(),
     supa.rest("bookmarks?select=target_type,target_id"),
     supa.rest("note_status?select=note_id,status"),
     supa.rest("photo_waiting?select=mark_id,item_id,label,subject,marked_on&order=marked_on"),
     supa.rest("inbox?select=id,kind,body,target_type,target_id,part,status,reply,sent_at,done_at&order=sent_at.desc&limit=200"),
   ]);
   if (state.ops.length) return true; // 取得中に新しい操作があれば次の同期で取り込む
-  state.attempts = att;
+  const others = (x) => JSON.stringify([x.bookmarks, x.noteStatus, x.waiting, x.inbox]);
+  const before = others(state);
+  const attBefore = state.attempts.length;
+  if (full) {
+    state.attempts = att;
+  } else if (att.length) {
+    const byId = new Map(state.attempts.map((a) => [a.id, a]));
+    for (const a of att) byId.set(a.id, a);
+    state.attempts = [...byId.values()];
+  }
+  const last = att.reduce((m, a) => (a.created_at && (!m || a.created_at > m) ? a.created_at : m), null);
+  if (last) await store.set(ns() + "attCursor", last);
+  else if (full) await store.set(ns() + "attCursor", "1970-01-01T00:00:00Z"); // 記録が0件でも目印を置き、次から差分にする
+  if (full) await store.set(ns() + "attFullAt", Date.now());
+  lastPull = { full, attempts: att.length };
   state.bookmarks = Object.fromEntries(bm.map((b) => [`${b.target_type}:${b.target_id}`, true]));
   state.noteStatus = Object.fromEntries(nst.map((x) => [x.note_id, x.status]));
   state.waiting = wait;
   state.inbox = inbox;
+  recordsChanged = others(state) !== before || state.attempts.length !== attBefore || (full && att.length > 0 && attBefore === 0);
   await save();
   return true;
 }
 
+// 同期してから時間がたっていないか（アプリを開いたとき・戻ってきたときの同期を省くため）
+export const RESYNC_MS = 10 * 60 * 1000;
+export function syncedRecently(now = Date.now()) {
+  return !!state.lastSync && now - new Date(state.lastSync).getTime() < RESYNC_MS;
+}
+
 export async function pull(onStep = () => {}) {
+  contentChanged = false;
+  recordsChanged = false;
   const problems = await pullProblems(onStep);
   const supaOk = await pullSupa(onStep);
   if (problems === null && !supaOk && !demo()) throw new Error("設定で、進捗管理アプリと同じアカウントでログインしてください");
   state.lastSync = new Date().toISOString();
   await store.set(ns() + "lastSync", state.lastSync);
-  return { problems: problems ?? state.problems.length };
+  if (demo()) contentChanged = true;
+  return { problems: problems ?? state.problems.length, changed: contentChanged || recordsChanged };
 }
 
 // ---------- 送信 ----------
