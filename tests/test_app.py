@@ -1,4 +1,4 @@
-"""誤答トレーニング v0.7.0 の動作テスト（スマホ幅）。
+"""誤答トレーニング v0.8.0 の動作テスト（スマホ幅）。
 
 1. 見本モード：選んだ答えで自動判定 → 解説 → 次へ、小問つき問題（小問ごとに解説→次の小問、全問正解で解けた）、
    ブックマーク、疑問ノートのスワイプ仕分け、間隔反復
@@ -227,6 +227,7 @@ with sync_playwright() as pw:
         print("    ", row)
     check([x[0] for x in r] == [7, 14, 1, 1, 7, 14, 28], "間隔：7→14、解けないと1日、また7→14→28")
     check([x[1] for x in r] == ["learning", "teichaku", "learning", "caution", "learning", "teichaku", "teichaku"], "状態：2回続けて解けた＝定着、2回続けて解けない＝要注意")
+
     check(r[-1][2] == "2027-02-21", "試験前は残り日数の半分が上限（2/11→2/21）")
 
     page.click("#home")
@@ -258,6 +259,26 @@ with sync_playwright() as pw:
     check("1" in page.eval_on_selector_all(".stat b", "els => els.map(e => e.textContent)")[0], "右スワイプで「定着」")
     st = page.evaluate("async () => (await import('./js/data.js')).state.noteStatus")
     check(list(st.values()) == ["teichaku"], f"ノートの状態が定着 {st}")
+    # ノートの問題が全部定着すると、ノートも自動で定着
+    auto = page.evaluate("""async () => {
+      const d = await import('./js/data.js');
+      const n = d.state.notes[0];
+      const t0 = Date.now() - 20 * 86400000;
+      const s = await import('./js/store.js');
+      window.__saved = [...d.state.attempts];
+      for (const pid of n.problems) for (const k of [0, 1]) d.state.attempts.push({ id: pid + k, problem_id: pid, solved: true, chosen: 0, at: new Date(t0 + k * 8 * 86400000).toISOString() });
+      await s.set('demo:attempts', d.state.attempts);
+      d.state.noteStatus[n.id] = 'fukushu';
+      await s.set('demo:noteStatus', d.state.noteStatus);
+      return n.id;
+    }""")
+    page.goto(f"http://localhost:{PORT}/#note/{auto}")
+    page.reload()
+    page.wait_for_selector("#toT")
+    check("自動で「定着」" in page.inner_text("#view") and "ghost" not in page.get_attribute("#toT", "class"), "ノートの問題が全部定着 → ノートも自動で定着")
+    page.evaluate("async () => { const d = await import('./js/data.js'); const s = await import('./js/store.js'); const a = d.state.attempts.filter(x => !/[01]$/.test(x.id) || x.id.length > 30); d.state.attempts = a; await s.set('demo:attempts', a); }")
+
+
     ctx.close()
 
     # ================= 連携モード（GitHub＋Supabase） =================

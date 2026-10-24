@@ -5,7 +5,7 @@ import * as tracker from "./tracker.js";
 import { buildStates, todayQueue, ymd, daysBetween, EXAMS } from "./srs.js";
 import { rich, inline, escapeHTML as esc } from "./render.js";
 
-export const VERSION = "0.7.0";
+export const VERSION = "0.8.0";
 const SUBJECTS = ["数学", "物理", "英語", "電験"];
 const LAB = "ABCDE";
 const STATUS = {
@@ -15,6 +15,16 @@ const STATUS = {
 };
 const KIND_LABEL = { mistake: "誤答", inquiry: "調べもの" };
 const NOTE_STATUS = { teichaku: "定着", fukushu: "復習中" };
+
+// ノートの状態：スワイプで「定着」にしたか、ノートの問題が全部定着していれば定着（問題から自動）
+function noteAuto(n) {
+  const ps = (n.problems || []).filter((id) => data.state.byId[id]);
+  return ps.length > 0 && ps.every((id) => states[id]?.status === "teichaku");
+}
+function noteSt(n) {
+  if (data.state.noteStatus[n.id] === "teichaku" || noteAuto(n)) return "teichaku";
+  return data.state.noteStatus[n.id] || null;
+}
 const kindOf = (p) => p.kind || "mistake";
 
 const $ = (s, el = document) => el.querySelector(s);
@@ -695,7 +705,7 @@ function noteList() {
   const f = ui.noteFilter;
   const ns = data.state.notes
     .filter((n) => !ui.subject || n.subject === ui.subject)
-    .filter((n) => !f || (f === "bookmark" ? data.isBookmarked("note", n.id) : f === "teichaku" ? data.state.noteStatus[n.id] === "teichaku" : data.state.noteStatus[n.id] !== "teichaku"))
+    .filter((n) => !f || (f === "bookmark" ? data.isBookmarked("note", n.id) : f === "teichaku" ? noteSt(n) === "teichaku" : noteSt(n) !== "teichaku"))
     .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.id < b.id ? 1 : -1));
   const toSort = deckNotes().length;
   view.insertAdjacentHTML("beforeend", `<button class="btn" id="sortBtn" ${toSort ? "" : "disabled"} style="margin:0 0 12px">${toSort ? `仕分ける（${toSort}枚）` : "仕分けるノートはありません"}</button>`);
@@ -707,7 +717,7 @@ function noteList() {
   const wrap = document.createElement("div");
   wrap.className = "list";
   for (const n of ns) {
-    const st = data.state.noteStatus[n.id];
+    const st = noteSt(n);
     const it = document.createElement("div");
     it.className = `item c-${n.subject}`;
     it.innerHTML = `<span class="pill ${st === "teichaku" ? "st-ok" : st ? "st-mid" : "st-new"}">${st ? NOTE_STATUS[st] : "未"}</span><span class="t"><b>${esc(n.title)}</b><span>${n.subject}　${md(n.date)}　問題 ${n.problems.length}問</span></span>${star("note", n.id)}`;
@@ -724,12 +734,14 @@ async function noteView(id) {
   header(n.title, true);
   tab("list");
   tracker.touch();
-  const st = data.state.noteStatus[n.id];
+  const st = noteSt(n);
+  const auto = noteAuto(n) && data.state.noteStatus[n.id] !== "teichaku";
   view.innerHTML = `<div class="card c-${n.subject}">
       <div class="meta"><span class="badge">疑問</span><b>${n.subject}</b><span>${n.week}</span><span>${md(n.date)}</span>${star("note", n.id)}</div>
       ${noteHTML(n)}
       ${n.originals?.length && data.canPhotos() ? '<div class="photo"><button class="chip" id="photo">質問の画像を見る</button><div id="photos"></div></div>' : ""}
       <div class="row" style="margin-top:12px"><button class="btn ${st === "fukushu" ? "" : "ghost"}" id="toF" style="margin:0">復習中</button><button class="btn ${st === "teichaku" ? "" : "ghost"}" id="toT" style="margin:0">定着</button></div>
+      ${auto ? '<p class="note" style="margin:6px 0 0">このノートの問題がすべて定着したので、自動で「定着」になっています。</p>' : ""}
     </div>
     <div class="list"><h3>このノートの問題（${n.problems.length}問）</h3></div>
     <div class="card" id="noteCompose"></div>`;
@@ -758,7 +770,7 @@ async function noteView(id) {
 function deckNotes() {
   return data.state.notes
     .filter((n) => !ui.subject || n.subject === ui.subject)
-    .filter((n) => data.state.noteStatus[n.id] !== "teichaku")
+    .filter((n) => noteSt(n) !== "teichaku")
     .sort((a, b) => (a.date < b.date ? -1 : 1));
 }
 
