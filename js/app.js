@@ -3,14 +3,16 @@ import * as data from "./data.js";
 import { buildStates, todayQueue, ymd, daysBetween, EXAMS } from "./srs.js";
 import { rich, inline, escapeHTML as esc } from "./render.js";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 const SUBJECTS = ["数学", "物理", "英語", "電験"];
 const MARK = { o: "○", d: "△", x: "×" };
 const LAB = "ABCDE";
 
 const $ = (s, el = document) => el.querySelector(s);
 const view = $("#view");
-const ui = { subject: null, listMode: "subject", session: null };
+const ui = { subject: null, kind: null, listMode: "subject", session: null };
+const KIND_LABEL = { mistake: "誤答", inquiry: "調べもの" };
+const kindOf = (p) => p.kind || "mistake";
 let states = {};
 
 // ---------- 共通 ----------
@@ -70,6 +72,40 @@ function chips(items, current, onPick) {
   return wrap;
 }
 
+// 科目と種類の絞り込みを通した問題
+function pool() {
+  return data.state.problems.filter((p) => (!ui.subject || p.subject === ui.subject) && (!ui.kind || kindOf(p) === ui.kind));
+}
+
+function filterChips(rerender) {
+  const box = document.createElement("div");
+  box.append(chips([[null, "すべて"], ["mistake", "誤答"], ["inquiry", "調べもの"]], ui.kind, (v) => { ui.kind = v; rerender(); }));
+  box.append(chips([[null, "全科目"], ...SUBJECTS.map((x) => [x, x])], ui.subject, (v) => { ui.subject = v; rerender(); }));
+  return box;
+}
+
+function filterLabel() {
+  return [ui.kind ? KIND_LABEL[ui.kind] : "", ui.subject || ""].filter(Boolean).join("・");
+}
+
+function noteHTML(n) {
+  if (!n) return '<p class="note">ノートが見つかりません（同期してください）</p>';
+  const pts = (n.points || []).map((x) => `<li>${inline(x)}</li>`).join("");
+  const srcs = (n.sources || []).map((x) => `<li>${x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a>` : esc(x.title)}</li>`).join("");
+  const ups = (n.updates || []).map((u) => `<div class="exp" style="margin-top:8px"><h4>追記 ${md(u.date)}：${esc(u.asked)}</h4>${rich(u.explanation)}</div>`).join("");
+  return `<div class="asked">Q. ${esc(n.asked)}</div>
+    <div class="q">${rich(n.explanation)}</div>
+    <div class="nfigs" data-note="${esc(n.id)}"></div>
+    ${pts ? `<div class="pt"><h4>要点</h4><ul>${pts}</ul></div>` : ""}
+    ${ups}
+    ${srcs ? `<div class="srcs"><h4>出典</h4><ul>${srcs}</ul></div>` : ""}`;
+}
+
+async function fillNoteFigures(el, n) {
+  const box = el.querySelector(".nfigs");
+  if (box && n?.figures?.length) box.innerHTML = await figuresHTML(n);
+}
+
 function srcText(p) {
   const s = p.source || {};
   return [s.book, s.number, s.page ? `p${s.page}` : "", s.detail].filter(Boolean).join(" ");
@@ -124,7 +160,7 @@ function home() {
     view.innerHTML = `
       <div class="card">
         <h3 style="margin-top:0">はじめに</h3>
-        <p class="note">${s.token || s.demo ? "まだ問題がありません。右上の表示が「同期」になってから、もう一度開いてください。" : "設定で GitHub のトークンを入力すると、study-mistakes の問題を読み込みます。先に見本の4問で操作を試すこともできます。"}</p>
+        <p class="note">${s.token || s.demo ? "まだ問題がありません。右上の表示が「同期」になってから、もう一度開いてください。" : "設定で GitHub のトークンを入力すると、study-mistakes の問題を読み込みます。先に見本の問題で操作を試すこともできます。"}</p>
         ${s.token || s.demo ? '<button class="btn" id="pull">今すぐ同期</button>' : '<button class="btn" id="toSettings">設定を開く</button><button class="btn ghost" id="demo">見本で試す</button>'}
       </div>`;
     $("#pull")?.addEventListener("click", async () => { await sync(); home(); });
@@ -133,17 +169,17 @@ function home() {
     return;
   }
 
-  view.append(chips([[null, "すべて"], ...SUBJECTS.map((x) => [x, x])], ui.subject, (v) => { ui.subject = v; home(); }));
+  view.append(filterChips(home));
   const limit = Number(s.dailyLimit) || 20;
   const done = doneToday();
-  const q = todayQueue(ps, states, { subject: ui.subject, limit, doneToday: done });
-  const dueAll = todayQueue(ps, states, { subject: ui.subject, limit: 9999 }).length;
+  const q = todayQueue(pool(), states, { limit, doneToday: done });
+  const dueAll = todayQueue(pool(), states, { limit: 9999 }).length;
   const exam = ui.subject === "電験" ? ["電験", EXAMS.電験] : ["入試", EXAMS.入試];
 
   const hero = document.createElement("div");
   hero.className = "card hero";
   hero.innerHTML = `
-    <div class="lbl">今日の復習${ui.subject ? `（${ui.subject}）` : ""}</div>
+    <div class="lbl">今日の復習${filterLabel() ? `（${filterLabel()}）` : ""}</div>
     <div class="big">${q.length}<small style="font-size:18px">問</small></div>
     <div class="lbl">今日解いた問題 ${done} ／ 上限 ${limit}${dueAll > q.length ? `　残り ${dueAll - q.length}問は明日以降` : ""}</div>
     <div class="lbl">${exam[0]}まで あと${daysBetween(ymd(), exam[1])}日</div>
@@ -154,13 +190,15 @@ function home() {
   const grid = document.createElement("div");
   grid.className = "subj";
   for (const sub of SUBJECTS) {
-    const list = ps.filter((p) => p.subject === sub);
+    const all = ps.filter((p) => p.subject === sub);
+    const list = all.filter((p) => !ui.kind || kindOf(p) === ui.kind);
     const due = todayQueue(list, states, { limit: 9999 }).length;
     const weak = list.filter((p) => states[p.id]?.last === "x").length;
+    const inq = all.filter((p) => kindOf(p) === "inquiry").length;
     const c = document.createElement("button");
     c.className = `card c-${sub}`;
     c.style.textAlign = "left";
-    c.innerHTML = `<b>${sub}</b><span class="n">登録 ${list.length}問　今日 ${due}問<br>直近× ${weak}問</span>`;
+    c.innerHTML = `<b>${sub}</b><span class="n">誤答 ${all.length - inq}・調べもの ${inq}<br>今日 ${due}問　直近× ${weak}問</span>`;
     c.onclick = () => { ui.subject = sub; ui.listMode = "subject"; go("list"); };
     grid.append(c);
   }
@@ -173,7 +211,7 @@ function home() {
     <p class="note" style="margin:8px 0 0">${s.demo ? "見本モードです。設定で解除できます。" : data.state.lastSync ? `最終同期 ${new Date(data.state.lastSync).toLocaleString("ja-JP")}` : ""}</p>`;
   view.append(foot);
   $("#weak").onclick = () => {
-    const w = ps.filter((p) => (!ui.subject || p.subject === ui.subject) && states[p.id]?.last === "x");
+    const w = pool().filter((p) => states[p.id]?.last === "x");
     if (!w.length) return toast("直近で×の問題はありません");
     startSession(w, "直近×の復習");
   };
@@ -211,7 +249,7 @@ async function card(p, { onDone, progress }) {
   box.innerHTML = `
     ${progress ? `<div class="progress"><i style="width:${progress}%"></i></div>` : ""}
     <div class="card c-${p.subject}">
-      <div class="meta"><b>${p.subject}</b><span>${p.week}</span><span>${esc(srcText(p))}</span><span class="topic">${esc(p.topic)}</span></div>
+      <div class="meta">${kindOf(p) === "inquiry" ? '<span class="badge">調べもの</span>' : ""}<b>${p.subject}</b><span>${p.week}</span><span>${esc(srcText(p))}</span><span class="topic">${esc(p.topic)}</span></div>
       <div class="q">${rich(p.question)}</div>
       <div id="figs"></div>
       <div class="choices" id="choices"></div>
@@ -247,18 +285,33 @@ async function card(p, { onDone, progress }) {
     });
     $("#reveal", box).parentElement.remove();
     const m = p.mistake || {};
+    const inquiry = kindOf(p) === "inquiry";
+    const note = inquiry ? data.state.notesById[p.note] : null;
+    const tail = inquiry
+      ? `<div class="pt"><div><b>覚えておくこと</b>　${inline(p.point || "")}</div></div>
+         <div class="photo"><button class="chip" id="noteBtn">元の疑問と解説を読む${note ? `：${esc(note.title)}` : ""}</button><div id="noteBox" class="notebox" hidden></div></div>`
+      : `<div class="mis"><div><b>${esc(m.type || "")} 前回の間違い</b>　${inline(m.what || "")}</div><div><b>防ぐには</b>　${inline(m.prevent || "")}</div></div>`;
     const a = $("#answer", box);
     a.className = "answer";
     a.innerHTML = `
       <div class="verdict ${correct ? "ok" : "ng"}">${chosen === null ? "答えを確認" : correct ? "正解" : "不正解"}</div>
       <div class="exp"><h4>解説</h4>${rich(p.explanation)}</div>
-      <div class="mis"><div><b>${esc(m.type || "")} 前回の間違い</b>　${inline(m.what || "")}</div><div><b>防ぐには</b>　${inline(m.prevent || "")}</div></div>
+      ${tail}
       ${p.originals?.length && data.canSync() ? '<div class="photo"><button class="chip" id="photo">元の写真を見る</button><div id="photos"></div></div>' : ""}
       <div class="rate">
         <button class="o ${correct ? "hint" : ""}" data-r="o"><b>○</b><small>わかった</small></button>
         <button class="d" data-r="d"><b>△</b><small>あやしい</small></button>
         <button class="x ${correct ? "" : "hint"}" data-r="x"><b>×</b><small>わからない</small></button>
       </div>`;
+    $("#noteBtn", a)?.addEventListener("click", async () => {
+      const nb = $("#noteBox", a);
+      nb.hidden = !nb.hidden;
+      if (!nb.hidden && !nb.dataset.done) {
+        nb.innerHTML = noteHTML(note);
+        nb.dataset.done = "1";
+        await fillNoteFigures(nb, note);
+      }
+    });
     $("#photo", a)?.addEventListener("click", async (ev) => {
       ev.target.disabled = true;
       try {
@@ -331,9 +384,10 @@ function list() {
   header("一覧");
   tab("list");
   view.innerHTML = "";
-  view.append(chips([["subject", "科目別"], ["week", "週別"]], ui.listMode, (v) => { ui.listMode = v; list(); }));
-  view.append(chips([[null, "すべて"], ...SUBJECTS.map((x) => [x, x])], ui.subject, (v) => { ui.subject = v; list(); }));
-  const ps = data.state.problems.filter((p) => !ui.subject || p.subject === ui.subject);
+  view.append(chips([["subject", "科目別"], ["week", "週別"], ["notes", "疑問ノート"]], ui.listMode, (v) => { ui.listMode = v; list(); }));
+  if (ui.listMode === "notes") return noteList();
+  view.append(filterChips(list));
+  const ps = pool();
   if (!ps.length) {
     view.insertAdjacentHTML("beforeend", '<div class="empty">問題がありません</div>');
     return;
@@ -361,12 +415,67 @@ function list() {
       const it = document.createElement("button");
       it.className = `item c-${p.subject}`;
       it.innerHTML = `<span class="mark ${st ? st.last : "n"}">${st ? MARK[st.last] : "新"}</span>
-        <span class="t"><b>${esc(p.topic)}</b><span>${esc(srcText(p))}　${md(p.date)}${st ? `　次回 ${md(st.due)}` : ""}</span></span>`;
+        <span class="t"><b>${kindOf(p) === "inquiry" ? '<span class="badge">調</span>' : ""}${esc(p.topic)}</b><span>${esc(srcText(p))}　${md(p.date)}${st ? `　次回 ${md(st.due)}` : ""}</span></span>`;
       it.onclick = () => go("problem/" + p.id);
       wrap.append(it);
     }
   }
   view.append(wrap);
+}
+
+function noteList() {
+  view.append(chips([[null, "全科目"], ...SUBJECTS.map((x) => [x, x])], ui.subject, (v) => { ui.subject = v; list(); }));
+  const ns = data.state.notes.filter((n) => !ui.subject || n.subject === ui.subject)
+    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.id < b.id ? 1 : -1));
+  if (!ns.length) {
+    view.insertAdjacentHTML("beforeend", '<div class="empty">疑問ノートはまだありません。<br>チャットで質問すると、ここに増えていきます。</div>');
+    return;
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "list";
+  for (const n of ns) {
+    const it = document.createElement("button");
+    it.className = `item c-${n.subject}`;
+    it.innerHTML = `<span class="mark n">疑</span><span class="t"><b>${esc(n.title)}</b><span>${n.subject}　${md(n.date)}　問題 ${n.problems.length}問</span></span>`;
+    it.onclick = () => go("note/" + n.id);
+    wrap.append(it);
+  }
+  view.append(wrap);
+}
+
+async function noteView(id) {
+  const n = data.state.notesById[id];
+  if (!n) return go("list");
+  header(n.title, true);
+  tab("list");
+  view.innerHTML = `<div class="card c-${n.subject}">
+      <div class="meta"><span class="badge">疑問</span><b>${n.subject}</b><span>${n.week}</span><span>${md(n.date)}</span></div>
+      ${noteHTML(n)}
+      ${n.originals?.length && data.canSync() ? '<div class="photo"><button class="chip" id="photo">質問の画像を見る</button><div id="photos"></div></div>' : ""}
+    </div>
+    <div class="list"><h3>このノートの問題（${n.problems.length}問）</h3></div>`;
+  await fillNoteFigures(view, n);
+  $("#photo")?.addEventListener("click", async (ev) => {
+    ev.target.disabled = true;
+    try {
+      for (const o of n.originals) {
+        const img = document.createElement("img");
+        img.src = await data.originalURL(o);
+        $("#photos").append(img);
+      }
+    } catch (e) { toast(errText(e)); }
+  });
+  const wrap = $(".list", view);
+  for (const pid of n.problems) {
+    const p = data.state.byId[pid];
+    if (!p) continue;
+    const st = states[p.id];
+    const it = document.createElement("button");
+    it.className = `item c-${p.subject}`;
+    it.innerHTML = `<span class="mark ${st ? st.last : "n"}">${st ? MARK[st.last] : "新"}</span><span class="t"><b>${esc(p.topic)}</b><span>${st ? `次回 ${md(st.due)}` : "まだ解いていません"}</span></span>`;
+    it.onclick = () => go("problem/" + p.id);
+    wrap.append(it);
+  }
 }
 
 // ---------- 設定 ----------
@@ -388,7 +497,7 @@ function settingsView() {
     </div>
     <div class="card">
       <h3 style="margin-top:0">データ</h3>
-      <div class="stat"><div><b>${data.state.problems.length}</b><span>問題</span></div><div><b>${data.state.events.length}</b><span>解答履歴</span></div><div><b>${data.state.pending.length}</b><span>未送信</span></div><div><b>${store.deviceId()}</b><span>端末ID</span></div></div>
+      <div class="stat five"><div><b>${data.state.problems.length}</b><span>問題</span></div><div><b>${data.state.notes.length}</b><span>ノート</span></div><div><b>${data.state.events.length}</b><span>解答履歴</span></div><div><b>${data.state.pending.length}</b><span>未送信</span></div><div><b>${store.deviceId()}</b><span>端末ID</span></div></div>
       <button class="btn ghost" id="pull">今すぐ同期</button>
       <button class="btn ghost" id="demo">${s.demo ? "見本モードを終える" : "見本モードで試す"}</button>
       <button class="btn ghost" id="reset" style="color:var(--ng);border-color:var(--ng)">端末内のデータを消す</button>
@@ -442,6 +551,7 @@ function route() {
   else if (h === "settings") settingsView();
   else if (h === "review") review();
   else if (h.startsWith("problem/")) single(h.slice(8));
+  else if (h.startsWith("note/")) noteView(h.slice(5));
   else home();
 }
 
@@ -449,7 +559,7 @@ document.querySelectorAll(".tabs button").forEach((b) => { b.onclick = () => { u
 $("#back").onclick = () => {
   if (ui.session && !window.confirm("復習を中断しますか？（答えた分は保存済み）")) return;
   ui.session = null;
-  if (location.hash.startsWith("#problem/")) history.back();
+  if (location.hash.startsWith("#problem/") || location.hash.startsWith("#note/")) history.back();
   else go("home");
 };
 window.addEventListener("hashchange", route);
@@ -466,7 +576,7 @@ async function init() {
   route();
   if (data.canSync() || store.settings().demo) {
     await sync({ quiet: true });
-    if (!ui.session && !location.hash.startsWith("#problem/")) route();
+    if (!ui.session && !location.hash.startsWith("#problem/") && !location.hash.startsWith("#note/")) route();
   }
 }
 

@@ -29,7 +29,8 @@ errors = []
 probs = []
 for f in sorted((DATA / "examples/problems").rglob("*.json")):
     probs.append(json.loads(f.read_text(encoding="utf-8")))
-remote = {"index/problems.json": json.dumps({"count": len(probs), "problems": probs}, ensure_ascii=False)}
+notes = [json.loads(f.read_text(encoding="utf-8")) for f in sorted((DATA / "examples/notes").rglob("*.json"))]
+remote = {"index/problems.json": json.dumps({"count": len(probs), "problems": probs, "notes": notes}, ensure_ascii=False)}
 for f in (DATA / "examples/figures").glob("*.svg"):
     remote[f"examples/figures/{f.name}"] = f.read_text(encoding="utf-8")
 shas = {}
@@ -85,10 +86,15 @@ with sync_playwright() as pw:
     # ---- 見本モード ----
     page.click("text=見本で試す")
     page.wait_for_selector("#start")
-    check("4" in page.inner_text(".hero .big"), "見本4問が今日の復習に入る")
+    check("6" in page.inner_text(".hero .big"), "見本6問（誤答4・調べもの2）が今日の復習に入る")
+    page.click(".chips >> nth=0 >> text=調べもの")
+    page.wait_for_function("() => document.querySelector('.hero .big').textContent.startsWith('2')")
+    check(True, "「調べもの」で絞ると2問")
+    page.click(".chips >> nth=0 >> text=すべて")
+    page.wait_for_function("() => document.querySelector('.hero .big').textContent.startsWith('6')")
     page.screenshot(path=OUT / "02-home.png", full_page=True)
     page.click("#start")
-    rates = ["x", "d", "o", "o"]
+    rates = ["x", "d", "o", "o", "o", "d"]
     for i, r in enumerate(rates):
         page.wait_for_selector(".choice")
         if "電験" in page.inner_text(".meta"):
@@ -110,6 +116,12 @@ with sync_playwright() as pw:
             idx = page.evaluate("() => { const t = document.querySelector('.meta .topic').textContent; return null; }")
             page.locator(".choice").first.click()
         page.wait_for_selector(".rate")
+        if page.locator(".meta .badge").count():
+            check(page.locator(".pt").count() == 1 and page.locator(".mis").count() == 0, f"{i + 1}問目（調べもの）に「覚えておくこと」が出る")
+            page.click("#noteBtn")
+            page.wait_for_selector("#noteBox .asked")
+            check("実効値" in page.inner_text("#noteBox"), "元の疑問と解説が開く")
+            page.screenshot(path=OUT / "04b-inquiry.png", full_page=True)
         if i == 0:
             check(page.locator(".choice.ng").count() == 1 and page.locator(".choice.ok").count() == 1, "不正解で赤と緑が付く")
             check(page.locator(".rate .x.hint").count() == 1, "不正解なら×をすすめる")
@@ -119,15 +131,23 @@ with sync_playwright() as pw:
         page.wait_for_function(f"() => document.querySelector('#title').textContent.includes('{nxt}') || document.body.textContent.includes('おつかれさまでした')")
     page.wait_for_selector("text=おつかれさまでした")
     page.screenshot(path=OUT / "05-summary.png", full_page=True)
-    check("4" in page.inner_text(".hero .big"), "まとめに4問")
+    check("6" in page.inner_text(".hero .big"), "まとめに6問")
 
     page.click(".tabs button[data-go=list]")
     page.wait_for_selector(".item")
     marks = page.eval_on_selector_all(".item .mark", "els => els.map(e => e.textContent)")
-    check(sorted(marks) == sorted(["×", "△", "○", "○"]), f"一覧に○△×が付く {marks}")
+    check(sorted(marks) == sorted(["×", "△", "○", "○", "○", "△"]), f"一覧に○△×が付く {marks}")
     page.screenshot(path=OUT / "06-list.png", full_page=True)
     page.click(".chips >> nth=0 >> text=週別")
     page.wait_for_selector("h3")
+    page.click(".chips >> nth=0 >> text=疑問ノート")
+    page.wait_for_selector(".item")
+    page.locator(".item").first.click()
+    page.wait_for_selector(".asked")
+    check(page.locator(".list .item").count() == 2, "ノート画面に問題2問が並ぶ")
+    page.screenshot(path=OUT / "06b-note.png", full_page=True)
+    page.click("#back")
+    page.wait_for_selector(".item")
     page.click(".tabs button[data-go=home]")
     page.wait_for_selector(".hero")
     check("0" in page.inner_text(".hero .big"), "今日の分が0問になる")
@@ -140,7 +160,7 @@ with sync_playwright() as pw:
       return Object.fromEntries(Object.entries(st).map(([k, v]) => [k, [v.last, v.interval, v.due]]));
     }""")
     print("    次回:", due)
-    check(sorted(v[1] for v in due.values()) == [1, 3, 7, 7], "×=1日、△=3日、○=7日")
+    check(sorted(v[1] for v in due.values()) == [1, 3, 3, 7, 7, 7], "×=1日、△=3日、○=7日")
 
     # 間隔の計算（単体）
     r = page.evaluate("""async () => {
@@ -175,7 +195,7 @@ with sync_playwright() as pw:
     pg.screenshot(path=OUT / "07-settings.png", full_page=True)
     pg.click(".tabs button[data-go=home]")
     pg.wait_for_selector("#start")
-    check("4" in pg.inner_text(".hero .big"), "GitHub から4問を読み込む")
+    check("6" in pg.inner_text(".hero .big"), "GitHub から6問を読み込む")
     pg.click("#start")
     for r in ["x", "o"]:
         pg.wait_for_selector(".choice")
@@ -195,7 +215,7 @@ with sync_playwright() as pw:
     pg.wait_for_selector(".item .mark")
     pg.wait_for_function("() => [...document.querySelectorAll('.item .mark')].filter(e => e.textContent !== '新').length >= 2", timeout=8000)
     marks = pg.eval_on_selector_all(".item .mark", "els => els.map(e => e.textContent)")
-    check(marks.count("新") == 2, f"履歴を GitHub から復元 {marks}")
+    check(marks.count("新") == 4, f"履歴を GitHub から復元 {marks}")
 
     # オフラインでも開ける
     pg.wait_for_timeout(500)

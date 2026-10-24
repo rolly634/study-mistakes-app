@@ -7,6 +7,8 @@ import { ymd } from "./srs.js";
 export const state = {
   problems: [],
   byId: {},
+  notes: [],     // 疑問ノート（調べもの）
+  notesById: {},
   events: [],    // 全解答履歴 {id, r, t, chosen, correct, dev}
   pending: [],   // まだ GitHub に書いていない履歴
   lastSync: null,
@@ -28,14 +30,20 @@ export function canSync() {
   return !s.demo && !!s.token && !!s.owner && !!s.repo;
 }
 
-function setProblems(list) {
+function setProblems(list, notes = []) {
   state.problems = list;
   state.byId = Object.fromEntries(list.map((p) => [p.id, p]));
+  state.notes = notes;
+  state.notesById = Object.fromEntries(notes.map((n) => [n.id, n]));
+}
+
+function allFigures(j) {
+  return [...j.problems, ...(j.notes || [])].flatMap((x) => x.figures || []);
 }
 
 export async function loadLocal() {
   const ns = demo() ? "demo:" : "";
-  setProblems(await store.get(ns + "problems", []));
+  setProblems(await store.get(ns + "problems", []), await store.get(ns + "notes", []));
   state.events = await store.get(ns + "events", []);
   state.pending = await store.get(ns + "pending", []);
   state.lastSync = await store.get(ns + "lastSync", null);
@@ -65,15 +73,14 @@ export async function pull(onStep = () => {}) {
   if (demo()) {
     onStep("見本を読み込み中");
     const j = await (await fetch("demo/problems.json", { cache: "no-store" })).json();
-    for (const p of j.problems) {
-      for (const f of p.figures || []) {
-        if (!(await store.get("fig:demo/" + f.file))) {
-          await store.set("fig:demo/" + f.file, await (await fetch("demo/" + f.file)).text());
-        }
+    for (const f of allFigures(j)) {
+      if (!(await store.get("fig:demo/" + f.file))) {
+        await store.set("fig:demo/" + f.file, await (await fetch("demo/" + f.file)).text());
       }
     }
-    setProblems(j.problems);
+    setProblems(j.problems, j.notes || []);
     await store.set("demo:problems", j.problems);
+    await store.set("demo:notes", j.notes || []);
     state.lastSync = new Date().toISOString();
     await store.set("demo:lastSync", state.lastSync);
     return { problems: j.problems.length, events: 0 };
@@ -83,16 +90,15 @@ export async function pull(onStep = () => {}) {
   onStep("問題を取得中");
   const j = JSON.parse(await r.text("index/problems.json"));
   let figs = 0;
-  for (const p of j.problems) {
-    for (const f of p.figures || []) {
-      if (!(await store.get("fig:" + f.file))) {
-        onStep(`図を取得中（${++figs}）`);
-        await store.set("fig:" + f.file, await r.text(f.file));
-      }
+  for (const f of allFigures(j)) {
+    if (!(await store.get("fig:" + f.file))) {
+      onStep(`図を取得中（${++figs}）`);
+      await store.set("fig:" + f.file, await r.text(f.file));
     }
   }
-  setProblems(j.problems);
+  setProblems(j.problems, j.notes || []);
   await store.set("problems", j.problems);
+  await store.set("notes", j.notes || []);
 
   onStep("解答履歴を取得中");
   const shas = await store.get("reviewShas", {});
@@ -191,5 +197,5 @@ export async function originalURL(path) {
 
 export async function resetLocal() {
   await store.clearAll();
-  state.problems = []; state.byId = {}; state.events = []; state.pending = []; state.lastSync = null;
+  state.problems = []; state.byId = {}; state.notes = []; state.notesById = {}; state.events = []; state.pending = []; state.lastSync = null;
 }
